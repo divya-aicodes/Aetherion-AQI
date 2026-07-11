@@ -1,0 +1,36 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // User Config
+    function isValidUserConfig(data) {
+      return data.keys().hasAll(['updatedAt'])
+             && data.updatedAt is string
+             && (!data.keys().hasAny(['selectedStrategies']) || data.selectedStrategies is list)
+             && (!data.keys().hasAny(['interventions']) || data.interventions is map);
+    }
+    
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+      
+      match /config/{configId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create: if isSignedIn() && request.auth.uid == userId 
+                      && isValidId(userId) && isValidId(configId)
+                      && isValidUserConfig(incoming());
+        allow update: if isSignedIn() && request.auth.uid == userId 
+                      && isValidId(userId) && isValidId(configId)
+                      && isValidUserConfig(incoming())
+                      && incoming().diff(existing()).affectedKeys().hasOnly(['selectedStrategies', 'interventions', 'updatedAt']);
+      }
+    }
+  }
+}

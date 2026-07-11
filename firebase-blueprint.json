@@ -1,0 +1,34 @@
+{
+  "entities": {
+    "UserConfig": {
+      "title": "User Config",
+      "description": "User specific configurations and selections for simulation.",
+      "type": "object",
+      "properties": {
+        "selectedStrategies": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "interventions": {
+          "type": "object",
+          "properties": {
+            "carUsage": { "type": "number" },
+            "publicTransport": { "type": "number" },
+            "industrial": { "type": "number" },
+            "emergency": { "type": "boolean" }
+          }
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": ["updatedAt"]
+    }
+  },
+  "firestore": {
+    "users/{userId}/config/main": {
+      "schema": { "$ref": "#/entities/UserConfig" },
+      "description": "User simulation configurations."
+    }
+  }
+}
