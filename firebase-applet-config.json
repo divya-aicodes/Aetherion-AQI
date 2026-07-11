@@ -1,7 +1,7 @@
 {
   "projectId": "gen-lang-client-0820279943",
   "appId": "1:427796035988:web:bdc3fdebf0fe95f6aab781",
-  "apiKey": "AIzaSyAqyaiptgeTshimsOu7mR8e6-ptI58j3Dg",
+  "apiKey": "Your_Gemini_API_Key",
   "authDomain": "gen-lang-client-0820279943.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-b4dfede9-c5e1-4778-9a15-0f9fcdf26f38",
   "storageBucket": "gen-lang-client-0820279943.firebasestorage.app",
