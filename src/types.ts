@@ -3,28 +3,19 @@ export interface AQIData {
   location: string;
   city: string;
   country: string;
-  parameter?: string;
+  parameter: 'pm25';
   value: number;
   lastUpdated: string;
-  unit?: string;
-  pm25?: number;
-  isEstimated?: boolean;
+  unit: 'µg/m³';
+  pm25: number;
+  isEstimated: boolean;
   source: string;
-  coordinates: {
-    latitude: number;
-    longitude: number;
-  };
-  riskLevel?: 'Good' | 'Moderate' | 'Unhealthy for Sensitive Groups' | 'Unhealthy' | 'Very Unhealthy' | 'Hazardous';
+  coordinates: { latitude: number; longitude: number };
 }
 
-export interface SimulationResult {
-  oldAqi: number;
-  newAqi: number;
-  change: number;
-  percentImprovement: number;
-  breakdown: {
-    intervention: number;
-    strategies: number;
-  };
-  recommendations: string[];
+export interface AqiForecastPoint {
+  time: string;
+  label: string;
+  aqi: number;
+  pm25: number;
 }

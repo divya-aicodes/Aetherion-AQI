@@ -80,7 +80,7 @@ const CITIES: Record<string, { coordinates: [number, number]; country: string }>
   'São Paulo': { coordinates: [-23.5505, -46.6333], country: 'Brazil' },
 };
 
-type AqiReading = { id: string; location: string; city: string; country: string; value: number; pm25: number; parameter: 'pm25'; unit: 'µg/m³'; source: 'Open-Meteo'; lastUpdated: string; coordinates: { latitude: number; longitude: number }; isEstimated: false };
+type AqiReading = { id: string; location: string; city: string; country: string; value: number; pm25: number; parameter: 'pm25'; unit: 'µg/m³'; source: 'Open-Meteo'; lastUpdated: string; coordinates: { latitude: number; longitude: number }; isEstimated: true };
 let cache: { timestamp: number; readings: AqiReading[] } | null = null;
 const requestLog = new Map<string, number[]>();
 
@@ -140,7 +140,7 @@ async function fetchReadings(): Promise<AqiReading[]> {
         const pm25 = Number(response?.current?.pm2_5);
         if (!Number.isFinite(pm25) || pm25 < 0) return;
         const providerAqi = Number(response?.current?.us_aqi);
-        readings.push({ id: `open-meteo-${city.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, location: city, city, country: meta.country, value: Number.isFinite(providerAqi) ? Math.round(providerAqi) : pm25ToUsAqi(pm25), pm25: Math.round(pm25 * 10) / 10, parameter: 'pm25', unit: 'µg/m³', source: 'Open-Meteo', lastUpdated: response.current.time ? `${response.current.time}Z` : new Date().toISOString(), coordinates: { latitude, longitude }, isEstimated: false });
+        readings.push({ id: `open-meteo-${city.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, location: city, city, country: meta.country, value: Math.min(500, Number.isFinite(providerAqi) ? Math.round(providerAqi) : pm25ToUsAqi(pm25)), pm25: Math.round(pm25 * 10) / 10, parameter: 'pm25', unit: 'µg/m³', source: 'Open-Meteo', lastUpdated: response.current.time ? `${response.current.time}Z` : new Date().toISOString(), coordinates: { latitude, longitude }, isEstimated: true });
       });
     }
     await new Promise(resolve => setTimeout(resolve, 250));
@@ -161,30 +161,49 @@ async function startServer() {
     try { const results = await fetchReadings(); res.set('Cache-Control', 'no-store, max-age=0').json({ results, meta: { count: results.length, monitoredLocations: Object.keys(CITIES).length, timestamp: new Date().toISOString(), cacheTtlSeconds: CACHE_TTL_MS / 1000, source: 'Open-Meteo', syntheticData: false } }); }
     catch { res.status(502).json({ error: 'Air-quality provider is temporarily unavailable.' }); }
   });
+  app.get('/api/aqi/detail', async (req, res) => {
+    const city = cleanText(req.query.city, 80);
+    const entry = Object.entries(CITIES).find(([name]) => name.toLowerCase() === city.toLowerCase());
+    if (!entry) return res.status(404).json({ error: 'City is not in the monitored location list.' });
+    const [name, meta] = entry;
+    try {
+      const response = await axios.get('https://air-quality-api.open-meteo.com/v1/air-quality', {
+        params: { latitude: meta.coordinates[0], longitude: meta.coordinates[1], hourly: 'pm2_5,us_aqi', forecast_days: 2, timezone: 'auto' },
+        timeout: 20_000,
+      });
+      const times: string[] = response.data?.hourly?.time || [];
+      const aqiValues: Array<number | null> = response.data?.hourly?.us_aqi || [];
+      const pm25Values: Array<number | null> = response.data?.hourly?.pm2_5 || [];
+      const oneHourAgo = Date.now() - 60 * 60 * 1000;
+      const forecast = times.map((time, index) => ({ time, aqi: Number(aqiValues[index]), pm25: Number(pm25Values[index]) }))
+        .filter(point => Number.isFinite(point.aqi) && Number.isFinite(point.pm25) && new Date(point.time).getTime() >= oneHourAgo)
+        .slice(0, 24)
+        .map(point => ({ ...point, aqi: Math.min(500, Math.round(point.aqi)), pm25: Math.round(point.pm25 * 10) / 10, label: new Date(point.time).toLocaleTimeString('en', { hour: 'numeric' }) }));
+      return res.set('Cache-Control', 'public, max-age=900').json({ city: name, country: meta.country, forecast, meta: { source: 'Open-Meteo', modeled: true } });
+    } catch {
+      return res.status(502).json({ error: 'The hourly air-quality outlook is temporarily unavailable.' });
+    }
+  });
 
   app.use('/api/ai', rateLimit, requireFirebaseUser);
   app.post('/api/ai/chat', async (req, res) => {
     const message = cleanText(req.body?.message, 2000); if (!message) return res.status(400).json({ error: 'Message is required.' });
     if (!ai) return res.status(503).json({ error: 'AI service is not configured.' });
-    try { const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: `You are Aetherion, a careful air-quality analyst. Clearly distinguish evidence from inference and never invent live readings. User question: ${message}` }); res.json({ text: response.text || 'No response generated.' }); }
-    catch { res.status(502).json({ error: 'AI provider is temporarily unavailable.' }); }
-  });
-  app.post('/api/ai/strategy', async (req, res) => {
-    const objective = cleanText(req.body?.objective, 3000); if (!objective) return res.status(400).json({ error: 'Objective is required.' });
-    if (!ai) return res.status(503).json({ error: 'AI service is not configured.' });
-    try { const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: `Develop an evidence-conscious environmental policy plan. Label assumptions and uncertainty; do not claim modeled percentages are forecasts. Objective: ${objective}`, config: { thinkingConfig: { thinkingBudget: 8192 } } }); res.json({ text: response.text || 'No response generated.' }); }
-    catch { res.status(502).json({ error: 'AI provider is temporarily unavailable.' }); }
-  });
-  app.post('/api/ai/recommendation', async (req, res) => {
-    if (!ai) return res.status(503).json({ error: 'AI service is not configured.' });
-    const simulation = JSON.stringify(req.body?.simulation || {}).slice(0, 4000);
-    try { const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: `Give a concise air-quality policy recommendation based on this illustrative scenario. State that it is not a validated forecast: ${simulation}` }); res.json({ text: response.text || 'No response generated.' }); }
+    const context = JSON.stringify(req.body?.context || {}).slice(0, 1200);
+    const history = JSON.stringify(Array.isArray(req.body?.history) ? req.body.history.slice(-6) : []).slice(0, 3000);
+    try { const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: `You are Aetherion, a careful air-quality educator. Answer briefly in plain language. The supplied reading is modeled Open-Meteo data, not a regulatory sensor. Clearly distinguish evidence from inference, never invent a live reading, never diagnose illness, and recommend official local guidance for high-risk decisions. Current selected-city context: ${context}. Recent conversation: ${history}. User question: ${message}` }); res.json({ text: response.text || 'No response generated.' }); }
     catch { res.status(502).json({ error: 'AI provider is temporarily unavailable.' }); }
   });
 
   if (process.env.NODE_ENV !== 'production') { const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' }); app.use(vite.middlewares); }
   else { const dist = path.join(process.cwd(), 'dist'); app.use(express.static(dist)); app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html'))); }
-  app.listen(PORT, '0.0.0.0', () => console.log(`Aetherion running on http://0.0.0.0:${PORT}`));
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log('');
+    console.log('✓ Aetherion AQI server is ready');
+    console.log(`✓ Open in your browser: http://localhost:${PORT}`);
+    console.log('✓ Press Ctrl+C to stop the server');
+    console.log('');
+  });
 }
 
 startServer().catch(error => { console.error('Server failed to start:', error); process.exit(1); });

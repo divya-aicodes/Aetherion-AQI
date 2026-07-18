@@ -1,40 +1,38 @@
 # Aetherion AQI
 
-Aetherion is an environmental intelligence dashboard for exploring current PM2.5 and US AQI readings across a curated global city network. It combines an interactive map, descriptive statistics, clearly labeled scenario exploration, saved preferences, and authenticated AI-assisted policy analysis.
+Aetherion is a focused air-quality dashboard for understanding current PM2.5 and US AQI across a curated network of Indian and global cities.
 
-## Data integrity
+## What it does
 
-- Current readings come from the Open-Meteo Air Quality API.
-- The server caches readings for 5 minutes and never fabricates missing stations.
-- Records include provider, observation time, PM2.5 concentration, units, and coordinates.
-- US AQI fallback conversion uses EPA PM2.5 breakpoints in `src/lib/aqi.ts`.
-- Policy controls are illustrative scenarios—not forecasts or medical advice.
+- Shows current modeled US AQI and PM2.5 with observation time and source
+- Explains health guidance using the standard US AQI categories
+- Provides a searchable, responsive city map
+- Displays a modeled 24-hour outlook for the selected city
+- Lets users save favorites locally and compare up to three cities
+- Offers an optional authenticated AI assistant grounded in the selected reading
+- Clearly labels data limitations instead of presenting modeled values as regulatory measurements
 
-## Architecture
+## Data and limitations
 
-- React 19, TypeScript, Vite and Tailwind CSS frontend
-- Express API and production static server
-- Open-Meteo server-side aggregation
-- Firebase Authentication and per-user Firestore preferences
-- Gemini requests proxied through authenticated, rate-limited server endpoints
-- Vitest unit tests for AQI conversion and statistics
+Current conditions and hourly outlooks come from the Open-Meteo Air Quality API. Values represent atmospheric model output at fixed city-center coordinates. They are **not** measurements from a regulatory station, medical advice, or a replacement for local government alerts.
+
+The Express server caches the city feed for five minutes, does not fabricate failed readings, and exposes the provider and observation timestamp with every result.
 
 ## Local setup
 
-1. Install Node.js 20 or later and run `npm install`.
-2. Copy `.env.example` to `.env.local`.
-3. Set `GEMINI_API_KEY` and `FIREBASE_API_KEY`.
-4. Enable Google sign-in in Firebase, add `localhost` under **Authentication → Settings → Authorized domains**, and deploy `firestore.rules`.
-5. Run `npm run dev`, then open `http://localhost:3000`.
+1. Install Node.js 20 or later.
+2. Run `npm install`.
+3. Copy `.env.example` to `.env.local` and add `GEMINI_API_KEY` if you want to use the assistant.
+4. Enable Google sign-in in Firebase and add `localhost` to **Authentication → Settings → Authorized domains**.
+5. Run `npm run dev`.
+6. Open `http://localhost:3000`.
+
+The public AQI dashboard does not require sign-in. Authentication protects the AI endpoint.
 
 ## Quality checks
 
-Run `npm run check` to execute TypeScript checking, unit tests, and a production build. `GET /api/health` reports API/cache health.
+`npm run check` runs TypeScript validation, unit tests, and a production build.
 
-## Production
+## Production notes
 
-Run `npm run build`, set `NODE_ENV=production`, and start with `npm start`. Keep secrets in the deployment platform's secret manager. Add infrastructure-level HTTPS, structured logs, and distributed rate limiting when deploying multiple instances.
-
-## Limitations
-
-Readings are provider model data at fixed coordinates, not regulatory-station measurements. Scenario coefficients are exploratory assumptions and must be calibrated against local inventories and peer-reviewed models before policy use.
+Run `npm run build`, set `NODE_ENV=production`, and start with `npm start`. Store secrets in the deployment platform—not in Git. A public deployment should also add HTTPS, observability, an infrastructure-level rate limiter, and an official local monitoring feed if regulatory accuracy is required.

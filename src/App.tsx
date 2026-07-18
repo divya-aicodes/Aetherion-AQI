@@ -1,775 +1,202 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import React, { useState, useEffect, useMemo } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line, AreaChart, Area, ReferenceLine, ScatterChart, Scatter, ZAxis
-} from 'recharts';
-import { 
-  Wind, Activity, Brain, Calculator, 
-  ChevronRight, ArrowUpRight, ArrowDownRight, Info, Settings2,
-  TrendingUp, Zap, Globe, MapPin, ShieldCheck, AlertCircle, Skull, Target, Command, Camera, Key
+import { onAuthStateChanged, type User } from 'firebase/auth';
+import { AnimatePresence } from 'motion/react';
+import {
+  Activity, AlertTriangle, Bot, Check, Clock3, CloudSun, HeartPulse, Info,
+  LayoutDashboard, Loader2, LogIn, LogOut, Map, RefreshCw, Search, ShieldCheck,
+  Star, TrendingDown, TrendingUp, Wind,
 } from 'lucide-react';
-import { cn, statsUtils } from './lib/utils';
-import { STRATEGIES, AQIStrategy } from './lib/strategies';
-import { AQIData, SimulationResult } from './types';
-import AetherionMap from './components/AetherionMap';
-import Chatbot from './components/Chatbot';
-import HighThinking from './components/HighThinking';
-import { aiApi } from './services/api';
-import { auth, db, loginWithGoogle, logout } from './firebase';
-import { onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import Markdown from 'react-markdown';
-import DecisionEngine from './DecisionEngine';
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import CityCompare from './components/CityCompare';
+import BlurText from './components/reactbits/BlurText';
+import BorderGlow from './components/reactbits/BorderGlow';
+import GooeyNav from './components/reactbits/GooeyNav';
+import ShinyText from './components/reactbits/ShinyText';
 import IntroPage from './IntroPage';
+import { auth, loginWithGoogle, logout } from './firebase';
+import { getAqiCategory } from './lib/aqi';
+import type { AQIData, AqiForecastPoint } from './types';
 
-// UI Components
-const Card = ({ children, className, title, icon: Icon }: any) => (
-  <div className={cn("bg-[#141414] border border-[#333] rounded-lg overflow-hidden flex flex-col", className)}>
-    {title && (
-      <div className="px-4 py-2 border-bottom border-[#333] flex items-center justify-between bg-[#1a1a1a]">
-        <div className="flex items-center gap-2">
-          {Icon && <Icon size={14} className="text-gray-400" />}
-          <span className="text-[10px] uppercase tracking-widest text-gray-400 font-medium font-mono">
-            {title}
-          </span>
-        </div>
-      </div>
-    )}
-    <div className="p-4 flex-1">
-      {children}
-    </div>
-  </div>
-);
+const AetherionMap = lazy(() => import('./components/AetherionMap'));
+const Chatbot = lazy(() => import('./components/Chatbot'));
+type Tab = 'overview' | 'map' | 'compare' | 'assistant';
+type CityFilter = 'all' | 'favorites' | 'unhealthy';
 
-const MathBox = (props: any) => {
-  const { label, formula, value, insight, children } = props;
-  return (
-    <div className="bg-[#0f0f0f] border border-[#222] p-3 rounded font-mono text-xs overflow-hidden">
-      <div className="text-gray-500 mb-1 uppercase text-[9px] tracking-tighter flex items-center justify-between gap-1">
-        <div className="flex items-center gap-1"><Calculator size={10} /> {label}</div>
-        {value && <span className="text-blue-400 font-bold">{value}</span>}
-      </div>
-      <div className="text-gray-400 py-1 font-serif italic text-[11px] border-b border-[#222] mb-2 flex justify-between items-end">
-        <span>{formula}</span>
-      </div>
-      <div className="text-gray-300/80 leading-relaxed mb-3 text-[10.5px]">
-        {insight}
-      </div>
-      {children && (
-        <div className="pt-2 h-32 w-full">
-           {children}
-        </div>
-      )}
-    </div>
-  );
+const tabs: Array<{ id: Tab; label: string; icon: typeof Wind }> = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'map', label: 'Map', icon: Map },
+  { id: 'compare', label: 'Compare', icon: CloudSun },
+  { id: 'assistant', label: 'AQI Assistant', icon: Bot },
+];
+
+const pageDescriptions: Record<Tab, string> = {
+  overview: 'Understand current conditions and the next 24 hours.',
+  map: 'Find a city and see how conditions differ by location.',
+  compare: 'Compare current exposure, forecasts, and the cleanest time window.',
+  assistant: 'Ask plain-language questions using the selected city as context.',
 };
 
+function formatObservation(value?: string | null) {
+  if (!value) return 'Unknown';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Unknown' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function minutesSince(value?: string | null) {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? null : Math.max(0, Math.round((Date.now() - time) / 60000));
+}
+
+function freshness(value?: string | null) {
+  const minutes = minutesSince(value);
+  if (minutes === null) return 'Time unavailable';
+  if (minutes < 2) return 'Updated just now';
+  return `Updated ${minutes} min ago`;
+}
+
+function forecastMetrics(points: AqiForecastPoint[]) {
+  if (!points.length) return null;
+  const average = Math.round(points.reduce((sum, point) => sum + point.aqi, 0) / points.length);
+  const peak = points.reduce((best, point) => point.aqi > best.aqi ? point : best);
+  const lowest = points.reduce((best, point) => point.aqi < best.aqi ? point : best);
+  const change = Math.round(points[points.length - 1].aqi - points[0].aqi);
+  return { average, peak, lowest, change };
+}
+
+function AqiBadge({ value }: { value: number }) {
+  const category = getAqiCategory(value);
+  return <span className="aqi-badge" style={{ color: category.color, borderColor: `${category.color}55`, background: `${category.color}12` }}>{category.label}</span>;
+}
+
+function DataNotice() {
+  return <div className="data-notice"><Info size={17}/><p><strong>Know what you are seeing.</strong> Open-Meteo modeled values at city-center coordinates—not regulatory monitor readings. Use local authority alerts for official decisions.</p></div>;
+}
+
 export default function App() {
-  const [aqiData, setAqiData] = useState<AQIData[]>([]);
+  const [data, setData] = useState<AQIData[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedStrategies, setSelectedStrategies] = useState<string[]>([]);
-  const [showGlobalGrid, setShowGlobalGrid] = useState(true);
-  const [showLethalOnly, setShowLethalOnly] = useState(false);
-  const [interventions, setInterventions] = useState({
-    carUsage: 30, // % reduction
-    publicTransport: 20, // % adoption
-    industrial: 15, // % reduction
-    emergency: false
-  });
-  const [simResult, setSimResult] = useState<SimulationResult | null>(null);
-  const [aiRecommendation, setAiRecommendation] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'decision-engine' | 'chat' | 'visuals' | 'deepthink'>('dashboard');
-  const [simulating, setSimulating] = useState(false);
-  const [offlineStatus, setOfflineStatus] = useState(false);
-  const [lastAqiSync, setLastAqiSync] = useState<string | null>(null);
-  const [focusedCityId, setFocusedCityId] = useState<string | null>(null);
-  const [user, setUser] = useState<any>(null);
-  const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [showIntro, setShowIntro] = useState(true);
-  const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
-  const [isDisconnecting, setIsDisconnecting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastSync, setLastSync] = useState<string | null>(null);
+  const [meta, setMeta] = useState<{ monitoredLocations?: number }>({});
+  const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [cityFilter, setCityFilter] = useState<CityFilter>('all');
+  const [favorites, setFavorites] = useState<string[]>(() => JSON.parse(localStorage.getItem('aetherion:favorites') || '[]'));
+  const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [forecast, setForecast] = useState<AqiForecastPoint[]>([]);
+  const [forecastLoading, setForecastLoading] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [showIntro, setShowIntro] = useState(() => sessionStorage.getItem('aetherion:intro-seen') !== 'yes');
+  const [showDisconnect, setShowDisconnect] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  const handleLogin = async () => {
-    if (isAuthenticating) return;
-    setIsAuthenticating(true);
-    setLoginError(null);
+  const fetchData = async (initial = false) => {
+    initial ? setLoading(true) : setRefreshing(true);
+    setError(null);
     try {
-      await loginWithGoogle();
-    } catch (error: any) {
-      if (error?.code === 'auth/unauthorized-domain') {
-        setLoginError(`This domain is not authorized in Firebase. Add "${window.location.hostname}" under Authentication → Settings → Authorized domains.`);
-      } else if (error?.code === 'auth/popup-closed-by-user') {
-         setLoginError("Login popup was closed. Please try again.");
-      } else if (error?.code !== 'auth/cancelled-popup-request') {
-        setLoginError("Authentication failed: " + error.message);
-        console.error("Authentication failed:", error);
-      }
+      const response = await axios.get('/api/aqi/live', { headers: { 'Cache-Control': 'no-cache' } });
+      const readings: AQIData[] = response.data.results || [];
+      setData(readings);
+      setMeta(response.data.meta || {});
+      setLastSync(response.data.meta?.timestamp || new Date().toISOString());
+      setSelectedId(current => current && readings.some(item => item.id === current) ? current : readings[0]?.id || null);
+    } catch {
+      setError('Current air-quality data could not be refreshed. Your last successful results remain visible.');
     } finally {
-      setIsAuthenticating(false);
-    }
-  };
-
-  const handleDisconnect = async () => {
-    if (isDisconnecting) return;
-    setIsDisconnecting(true);
-    try {
-      await logout();
-      setActiveTab('dashboard');
-      setShowDisconnectConfirm(false);
-      setShowIntro(true);
-    } finally {
-      setIsDisconnecting(false);
+      setLoading(false);
+      setRefreshing(false);
     }
   };
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-    });
-    return () => unsubscribe();
+    fetchData(true);
+    const interval = window.setInterval(() => fetchData(false), 5 * 60 * 1000);
+    return () => window.clearInterval(interval);
   }, []);
+  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  useEffect(() => { localStorage.setItem('aetherion:favorites', JSON.stringify(favorites)); }, [favorites]);
 
+  const selected = data.find(item => item.id === selectedId) || data[0];
   useEffect(() => {
-    if (user) {
-      getDoc(doc(db, "users", user.uid, "config", "main")).then(d => {
-        if (d.exists()) {
-          const data = d.data();
-          if (data.interventions) setInterventions(data.interventions);
-          if (data.selectedStrategies) setSelectedStrategies(data.selectedStrategies);
-        }
-      }).catch(console.error);
-    }
-  }, [user]);
+    if (!selected?.city) return;
+    setForecastLoading(true);
+    axios.get('/api/aqi/detail', { params: { city: selected.city } })
+      .then(response => setForecast(response.data.forecast || []))
+      .catch(() => setForecast([]))
+      .finally(() => setForecastLoading(false));
+  }, [selected?.city]);
 
-  useEffect(() => {
-    if (user) {
-      const timer = setTimeout(() => {
-        setDoc(doc(db, "users", user.uid, "config", "main"), {
-          interventions,
-          selectedStrategies,
-          updatedAt: new Date().toISOString()
-        }, { merge: true }).catch(console.error);
-      }, 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [interventions, selectedStrategies, user]);
+  const filtered = useMemo(() => {
+    const text = query.trim().toLowerCase();
+    return data
+      .filter(item => !text || `${item.city} ${item.country}`.toLowerCase().includes(text))
+      .filter(item => cityFilter === 'all' || cityFilter === 'favorites' && favorites.includes(item.id) || cityFilter === 'unhealthy' && item.value > 100)
+      .sort((a, b) => Number(favorites.includes(b.id)) - Number(favorites.includes(a.id)) || b.value - a.value);
+  }, [cityFilter, data, favorites, query]);
 
-  useEffect(() => {
-    fetchAQI();
-    
-    // Global Pulse: Auto-refresh every 20 seconds
-    const interval = setInterval(() => {
-      fetchAQI(false); 
-    }, 5 * 60 * 1000);
-    
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchAQI = async (showLoading = true) => {
-    try {
-      if (showLoading) setLoading(true);
-      // Fetching Global Sweep Data
-      const res = await axios.get(`/api/aqi/live?v=2`, { headers: { 'Cache-Control': 'no-cache' } });
-      setAqiData(res.data.results || []);
-      setLastAqiSync(res.data.meta?.timestamp || new Date().toISOString());
-      setOfflineStatus(false);
-    } catch (err: any) {
-      setOfflineStatus(true);
-      if (err.message === 'Network Error') {
-        console.warn('Aetherion Uplink: Network connection to HQ temporarily interrupted. Entering offline mode.');
-      } else {
-        console.error('AQI Data Sync Error:', err.message);
-      }
-    } finally {
-      if (showLoading) setLoading(false);
-    }
+  const category = selected ? getAqiCategory(selected.value) : null;
+  const outlook = forecastMetrics(forecast);
+  const readingAge = minutesSince(selected?.lastUpdated);
+  const toggleFavorite = (id: string) => setFavorites(items => items.includes(id) ? items.filter(item => item !== id) : [...items, id]);
+  const toggleCompare = (id: string) => setCompareIds(items => items.includes(id) ? items.filter(item => item !== id) : items.length < 3 ? [...items, id] : items);
+  const chooseCity = (id: string) => { setSelectedId(id); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  const closeIntro = () => { sessionStorage.setItem('aetherion:intro-seen', 'yes'); setShowIntro(false); };
+  const signIn = async () => {
+    setAuthBusy(true); setAuthError(null);
+    try { await loginWithGoogle(); closeIntro(); }
+    catch (cause: any) {
+      if (cause?.code !== 'auth/popup-closed-by-user') setAuthError(cause?.code === 'auth/unauthorized-domain' ? `Add ${window.location.hostname} to Firebase Authorized domains.` : 'Google sign-in did not complete. Please try again.');
+    } finally { setAuthBusy(false); }
   };
+  const disconnect = async () => { await logout(); setShowDisconnect(false); setActiveTab('overview'); setShowIntro(true); sessionStorage.removeItem('aetherion:intro-seen'); };
 
-  const values = useMemo(() => aqiData.map(d => d.value), [aqiData]);
-  
-  const stats = useMemo(() => {
-    if (values.length === 0) return null;
-    return {
-      mean: statsUtils.mean(values),
-      median: statsUtils.median(values),
-      stdDev: statsUtils.stdDev(values),
-      skewness: statsUtils.skewness(values),
-      kurtosis: statsUtils.kurtosis(values),
-      range: statsUtils.range(values)
-    };
-  }, [values]);
+  return <div className="app-shell">
+    <AnimatePresence>{showIntro && <IntroPage onClose={closeIntro} user={user} isAuthenticating={authBusy} handleLogin={signIn} loginError={authError} readings={data}/>}</AnimatePresence>
+    <header className="topbar">
+      <button className="brand" onClick={() => { setActiveTab('overview'); setShowIntro(true); }} aria-label="Open Aetherion introduction"><span className="brand-mark"><Wind size={21}/></span><span><strong>AETHERION</strong><small>Air quality, clearly explained</small></span></button>
+      <GooeyNav items={tabs.map(tab => ({ label: tab.label, icon: <tab.icon size={15}/> }))} activeIndex={tabs.findIndex(tab => tab.id === activeTab)} onSelect={index => setActiveTab(tabs[index].id)}/>
+      <div className="account">{user ? <><img src={user.photoURL || ''} alt=""/><span>{user.displayName?.split(' ')[0]}</span><button className="icon-button" onClick={() => setShowDisconnect(true)} aria-label="Sign out"><LogOut size={17}/></button></> : <button className="text-button" onClick={signIn}><LogIn size={16}/> Sign in</button>}</div>
+    </header>
 
-  const strategyReasoning = useMemo(() => {
-    if (!stats) return null;
-    let reason = "Standard Tit-for-Tat baseline recommended.";
-    let strat = "Tit-for-Tat";
-    
-    if (stats.kurtosis > 1) {
-      reason = "Extreme event frequency (high kurtosis) suggests robust containment protocols.";
-      strat = "Grim Trigger + Pavlov";
-    } else if (Math.abs(stats.skewness) > 0.5) {
-      reason = "Significant predictive asymmetry (skewness) requires adaptive pattern detection.";
-      strat = "Pattern Detection + Generous TFT";
-    } else if (stats.stdDev > 20) {
-      reason = "High volatility (variance) detected. Stability-focused strategies are prioritized.";
-      strat = "Regret Minimization";
-    }
-    return { reason, strat };
-  }, [stats]);
+    <main className="main-content">
+      <div className="page-heading"><div><span className="eyebrow"><span className={error ? 'status-dot error' : 'status-dot'}/><ShinyText text={error ? 'Data connection interrupted' : 'Live city overview'} color={error ? '#d8757d' : '#6f829a'} shineColor={error ? '#ffd2d5' : '#dbeafe'}/></span><BlurText key={activeTab} as="h1" text={activeTab === 'overview' ? 'Air quality at a glance' : tabs.find(tab => tab.id === activeTab)?.label || ''} delay={45}/><p>{pageDescriptions[activeTab]} · {data.length} locations · Open-Meteo</p></div><button className="refresh-button" onClick={() => fetchData(false)} disabled={refreshing}><RefreshCw size={16} className={refreshing ? 'spin' : ''}/>{refreshing ? 'Refreshing' : 'Refresh data'}</button></div>
+      {error && <div className="error-banner"><AlertTriangle size={17}/>{error}</div>}
 
-  // Reactive simulation - calculates impact on every slider/strategy change
-  const currentSimResult = useMemo(() => {
-    let currentStats = stats;
-    if (!currentStats) {
-      currentStats = { mean: 85.4, median: 78.2, stdDev: 22.4, skewness: 1.12, kurtosis: 0.85, range: 120 };
-    }
+      {loading ? <div className="loading-state"><Loader2 className="spin"/>Loading current air quality…</div> : <>
+        {activeTab === 'overview' && selected && category && <div className="stack">
+          <DataNotice/>
+          {readingAge !== null && readingAge > 90 && <div className="stale-banner"><Clock3 size={16}/><span>This modeled observation is {readingAge} minutes old. Check the timestamp before making time-sensitive decisions.</span></div>}
+          <section className="hero-grid">
+            <BorderGlow className="current-glow" edgeSensitivity={24} glowColor="215 90 70" animated colors={[category.color, '#3b82f6', '#34d399']}><article className="current-card" style={{ '--aqi-color': category.color } as React.CSSProperties}>
+              <div className="city-picker"><Search size={16}/><select value={selected.id} onChange={event => setSelectedId(event.target.value)} aria-label="Choose a city">{data.map(item => <option key={item.id} value={item.id}>{item.city}, {item.country}</option>)}</select><button onClick={() => toggleFavorite(selected.id)} aria-label={favorites.includes(selected.id) ? 'Remove favorite' : 'Add favorite'}><Star size={18} fill={favorites.includes(selected.id) ? 'currentColor' : 'none'}/></button></div>
+              <div className="current-value"><div><span>Current US AQI</span><strong>{Math.round(selected.value)}</strong></div><AqiBadge value={selected.value}/></div>
+              <p className="advisory"><HeartPulse size={18}/>{category.advisory}</p>
+              <div className="reading-meta"><span><Wind size={14}/>PM2.5 <b>{selected.pm25.toFixed(1)} µg/m³</b></span><span><Clock3 size={14}/>{freshness(selected.lastUpdated)}</span></div>
+            </article></BorderGlow>
+            <article className="panel forecast-panel">
+              <div className="panel-title"><div><span className="eyebrow">Modeled outlook</span><h2>What to expect in the next 24 hours</h2></div><span>{selected.city}</span></div>
+              {forecastLoading ? <div className="chart-loading"><Loader2 className="spin"/></div> : forecast.length ? <><ResponsiveContainer width="100%" height={205}><AreaChart data={forecast}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={category.color} stopOpacity={.35}/><stop offset="100%" stopColor={category.color} stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#ffffff0d" vertical={false}/><XAxis dataKey="label" tick={{ fill: '#7f8794', fontSize: 10 }} axisLine={false} tickLine={false}/><YAxis domain={[0, 'auto']} tick={{ fill: '#7f8794', fontSize: 10 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: '#10141b', border: '1px solid #2a303a', borderRadius: 10 }} formatter={value => [`${value} AQI`, 'US AQI']}/><Area type="monotone" dataKey="aqi" stroke={category.color} fill="url(#aqiFill)" strokeWidth={2}/></AreaChart></ResponsiveContainer>{outlook && <div className="outlook-summary"><div><Activity size={15}/><span>24h average<b>{outlook.average} AQI</b></span></div><div><TrendingUp size={15}/><span>Expected peak<b>{outlook.peak.aqi} at {outlook.peak.label}</b></span></div><div><Clock3 size={15}/><span>Cleanest hour<b>{outlook.lowest.aqi} at {outlook.lowest.label}</b></span></div><div>{outlook.change > 0 ? <TrendingUp size={15}/> : <TrendingDown size={15}/>}<span>Direction<b>{outlook.change === 0 ? 'Stable' : `${Math.abs(outlook.change)} points ${outlook.change > 0 ? 'worse' : 'better'}`}</b></span></div></div>}</> : <div className="chart-loading">The 24-hour outlook is temporarily unavailable.</div>}
+            </article>
+          </section>
+          <section className="panel city-browser">
+            <div className="panel-title"><div><span className="eyebrow">City explorer</span><h2>Find the place you care about</h2></div><label className="search-box"><Search size={15}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search city or country"/></label></div>
+            <div className="city-tools"><div>{(['all', 'favorites', 'unhealthy'] as CityFilter[]).map(filter => <button key={filter} className={cityFilter === filter ? 'active' : ''} onClick={() => setCityFilter(filter)}>{filter === 'all' ? 'All cities' : filter === 'favorites' ? `Favorites (${favorites.length})` : 'AQI above 100'}</button>)}</div><span>{filtered.length} result{filtered.length === 1 ? '' : 's'}</span></div>
+            {filtered.length ? <div className="city-table" role="table"><div className="table-head" role="row"><span>Location</span><span>US AQI</span><span>PM2.5</span><span>Status</span><span aria-label="Actions"/></div>{filtered.slice(0, 30).map(item => { const itemCategory = getAqiCategory(item.value); return <div className="table-row" role="row" key={item.id} onClick={() => chooseCity(item.id)}><span><b>{item.city}</b><small>{item.country}</small></span><span className="aqi-number" style={{ color: itemCategory.color }}>{Math.round(item.value)}</span><span>{item.pm25.toFixed(1)} <small>µg/m³</small></span><AqiBadge value={item.value}/><span className="row-actions"><button onClick={event => { event.stopPropagation(); toggleFavorite(item.id); }} aria-label={`${favorites.includes(item.id) ? 'Remove' : 'Add'} ${item.city} favorite`}><Star size={16} fill={favorites.includes(item.id) ? 'currentColor' : 'none'}/></button><button onClick={event => { event.stopPropagation(); toggleCompare(item.id); }} aria-label={`${compareIds.includes(item.id) ? 'Remove' : 'Add'} ${item.city} comparison`}>{compareIds.includes(item.id) ? <Check size={16}/> : <span>+</span>}</button></span></div>; })}</div> : <div className="empty-state compact"><Search size={28}/><h3>No cities match</h3><p>Try another search or change the filter.</p></div>}
+          </section>
+        </div>}
 
-    const baseAqi = currentStats.mean;
-    const invImpacts = {
-      car: interventions.carUsage * 0.4,
-      transit: interventions.publicTransport * 0.3,
-      industry: interventions.industrial * 0.6,
-      emergency: interventions.emergency ? 50 : 0
-    };
-    
-    const interventionImpact = (invImpacts.car + invImpacts.transit + invImpacts.industry + invImpacts.emergency) / 100;
+        {activeTab === 'map' && <div className="map-page"><DataNotice/><Suspense fallback={<div className="loading-state"><Loader2 className="spin"/>Loading map…</div>}><AetherionMap data={data} focusedCityId={selectedId} setFocusedCityId={setSelectedId} comparedIds={compareIds} onToggleCompare={toggleCompare} onViewOutlook={id => { setSelectedId(id); setActiveTab('overview'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}/></Suspense></div>}
+        {activeTab === 'compare' && <div className="stack"><DataNotice/><CityCompare data={data} favorites={favorites} selectedIds={compareIds} onToggle={toggleCompare}/></div>}
+        {activeTab === 'assistant' && <div className="assistant-page"><DataNotice/><div className="assistant-intro"><ShieldCheck size={22}/><div><h2>Ask about {selected?.city || 'air quality'}</h2><p>The assistant receives the selected reading and timestamp. It explains—not diagnoses—and does not replace official alerts.</p></div></div><Suspense fallback={<div className="loading-state"><Loader2 className="spin"/>Loading assistant…</div>}><Chatbot onSignIn={signIn} context={selected ? { city: selected.city, country: selected.country, aqi: selected.value, pm25: selected.pm25, observedAt: selected.lastUpdated, source: selected.source } : undefined}/></Suspense></div>}
+      </>}
+    </main>
 
-    const selectedStratObjects = STRATEGIES.filter(s => selectedStrategies.includes(s.id));
-    const strategyImpact = selectedStratObjects.reduce((acc, s) => {
-      const effect = (s.modifierRange[0] + s.modifierRange[1]) / 2;
-      return acc + effect;
-    }, 0) / (selectedStratObjects.length || 1);
-
-    const R = (interventionImpact * 0.65) + (strategyImpact * 0.35);
-    const newAqi = baseAqi * (1 - R * 0.65);
-
-    return {
-      oldAqi: baseAqi,
-      newAqi: newAqi,
-      change: baseAqi - newAqi,
-      percentImprovement: ((baseAqi - newAqi) / baseAqi) * 100,
-      R,
-      breakdown: {
-        car: invImpacts.car / 100,
-        transit: invImpacts.transit / 100,
-        industry: invImpacts.industry / 100,
-        emergency: invImpacts.emergency / 100,
-        strategies: strategyImpact
-      }
-    };
-  }, [stats, interventions, selectedStrategies]);
-const simulatedValues = useMemo(() => {
-    const rFactor = Math.max(0, 1 - currentSimResult.R * 0.65);
-    return values.map(v => v * rFactor);
-  }, [values, currentSimResult.R]);
-
-  const simulatedStats = useMemo(() => {
-    if (simulatedValues.length === 0) return null;
-    return {
-      mean: statsUtils.mean(simulatedValues),
-      median: statsUtils.median(simulatedValues),
-      stdDev: statsUtils.stdDev(simulatedValues),
-      skewness: statsUtils.skewness(simulatedValues),
-      kurtosis: statsUtils.kurtosis(simulatedValues),
-      range: statsUtils.range(simulatedValues)
-    };
-  }, [simulatedValues]);
-
-  const bothHistogramData = useMemo(() => {
-    if (values.length === 0 || simulatedValues.length === 0) return [];
-    
-    const allValues = [...values, ...simulatedValues];
-    const min = Math.floor(Math.min(...allValues) / 10) * 10;
-    const max = Math.ceil(Math.max(...allValues) / 10) * 10;
-    const binSize = Math.max(10, Math.ceil((max - min) / 15));
-    
-    const bins: { name: string; base: number; sim: number; binCenter: number }[] = [];
-    for (let i = min; i <= max; i += binSize) {
-      bins.push({ name: `${i}`, base: 0, sim: 0, binCenter: i + binSize / 2 });
-    }
-    
-    values.forEach(val => {
-      const bIdx = Math.min(bins.length - 1, Math.max(0, Math.floor((val - min) / binSize)));
-      if (bins[bIdx]) bins[bIdx].base++;
-    });
-
-    simulatedValues.forEach(val => {
-      const bIdx = Math.min(bins.length - 1, Math.max(0, Math.floor((val - min) / binSize)));
-      if (bins[bIdx]) bins[bIdx].sim++;
-    });
-    
-    return bins;
-  }, [values, simulatedValues]);
-
-  
-  const runSimulation = async () => {
-    setSimulating(true);
-    setAiRecommendation(null);
-    setSimResult(currentSimResult as any);
-
-    try {
-      const prompt = `As the AETHERION AI, analyze these simulation results:
-      Old AQI: ${currentSimResult.oldAqi.toFixed(2)}
-      New AQI: ${currentSimResult.newAqi.toFixed(2)}
-      Improvement: ${currentSimResult.percentImprovement.toFixed(2)}%
-      
-      Provide a highly fast, tactical recommendation for a city with these metrics. Stay technical and mathematical. Keep it briefly under 50 words.`;
-
-      const response = await aiApi.recommendation({ ...currentSimResult, context: prompt });
-      setAiRecommendation(response.text);
-    } catch (err) {
-      console.error("AI Error:", err);
-    } finally {
-      setSimulating(false);
-    }
-  };
-
-  const toggleStrategy = (id: string) => {
-    setSelectedStrategies(prev => 
-      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
-    );
-  };
-
-  // NEW Analytical Extractions for the Global Dashboard
-  const topPolluted = useMemo(() => {
-    return [...aqiData].sort((a, b) => b.value - a.value).slice(0, 20);
-  }, [aqiData]);
-
-  const focusedCityData = useMemo(() => {
-    if (!focusedCityId) return null;
-    return aqiData.find(d => d.id === focusedCityId);
-  }, [aqiData, focusedCityId]);
-
-  const highRiskCities = useMemo(() => {
-    return aqiData.filter(d => d.value >= 200);
-  }, [aqiData]);
-
-  const recommendedActions = useMemo(() => {
-    if (aqiData.length === 0) return [];
-    const maxAqi = Math.max(...aqiData.map(d => d.value));
-    
-    const actions = [];
-    if (maxAqi > 50) actions.push("Sensitive individuals should minimize heavy exertion.");
-    if (maxAqi > 100) actions.push("General population: utilize N95 filtration during outdoor transit.");
-    if (maxAqi > 200) actions.push("STRICT ADVISORY: Suspend all non-essential outdoor activity. Active masking required.");
-    if (maxAqi > 300) actions.push("EMERGENCY PROTOCOL: Absolute indoor confinement. Industrial emission dampening required.");
-    
-    return actions;
-  }, [aqiData]);
-
-  return (
-    <div className="min-h-screen bg-[#0a0a0a] text-gray-100 font-sans selection:bg-blue-500/30">
-      <AnimatePresence>
-        {showIntro && <IntroPage 
-          onClose={() => setShowIntro(false)} 
-          user={user}
-          isAuthenticating={isAuthenticating}
-          handleLogin={handleLogin}
-          loginError={loginError}
-        />}
-      </AnimatePresence>
-      {/* Header */}
-      <header className="h-16 border-b border-[#222] flex items-center justify-between px-6 bg-[#0a0a0a]/80 backdrop-blur-md sticky top-0 z-50">
-        <div className="flex items-center gap-4 cursor-pointer group" onClick={() => setShowIntro(true)}>
-          <div className="bg-blue-600 p-1.5 rounded-sm group-hover:bg-blue-500 transition-colors">
-            <Wind size={20} className="text-white" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-lg font-bold tracking-tighter uppercase group-hover:text-blue-400 transition-colors">Aetherion</h1>
-              {offlineStatus && (
-                <span className="text-[10px] bg-red-900/50 text-red-400 px-1.5 py-0.5 border border-red-800 rounded font-mono uppercase tracking-widest animate-pulse">
-                  OFFLINE Mode
-                </span>
-              )}
-            </div>
-            <p className="text-[10px] text-gray-500 font-mono tracking-widest uppercase -mt-1">Environmental Intelligence Unit</p>
-          </div>
-        </div>
-        
-        <nav className="flex gap-4">
-          {[
-            { id: 'dashboard', label: 'Monitor', icon: Globe },
-            { id: 'decision-engine', label: 'Decision Engine', icon: Activity },
-            { id: 'chat', label: 'AI Uplink', icon: Command },
-            { id: 'deepthink', label: 'Deep Intel', icon: Brain }
-          ].map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
-              className={cn(
-                "flex items-center gap-2 text-[10px] uppercase tracking-widest transition-colors font-medium px-2 py-1 rounded",
-                activeTab === tab.id ? "bg-blue-600/20 text-blue-400" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
-              )}
-            >
-              <tab.icon size={12} />
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-
-        <div className="flex items-center gap-4 border-l border-[#222] pl-6">
-          {user ? (
-            <div className="flex items-center gap-3">
-              <img src={user.photoURL} alt="Profile" className="w-6 h-6 rounded-full border border-[#444]" referrerPolicy="no-referrer" />
-              <button
-                onClick={() => setShowDisconnectConfirm(true)}
-                className="text-[10px] font-mono text-gray-400 hover:text-white uppercase tracking-widest"
-              >
-                Disconnect
-              </button>
-            </div>
-          ) : null}
-
-          <button 
-            onClick={() => setShowGlobalGrid(!showGlobalGrid)}
-            className={cn(
-              "px-3 py-1.5 rounded text-[10px] font-mono uppercase tracking-widest flex items-center gap-2 border transition-all",
-              showGlobalGrid 
-                ? "bg-blue-600/30 border-blue-500 text-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.3)]" 
-                : "bg-[#111] border-[#333] text-gray-500 hover:text-gray-300"
-            )}
-            title="Toggle Global Area Wash Grid"
-          >
-            <Globe size={14} className={cn(showGlobalGrid && "animate-pulse")} />
-            {showGlobalGrid ? "Grid: Online" : "Grid: Halted"}
-          </button>
-
-          <div className="flex flex-col items-end">
-            <span className="text-[8px] font-mono text-gray-600 uppercase tracking-widest leading-none mb-1">Telemetry Scope</span>
-            <div className="flex items-center gap-2">
-               <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
-               <span className="text-[10px] font-mono text-blue-400 font-bold uppercase tracking-tighter">Planetary Sweep Active</span>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <AnimatePresence>
-        {showDisconnectConfirm && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/75 backdrop-blur-sm px-4"
-            role="presentation"
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget && !isDisconnecting) setShowDisconnectConfirm(false);
-            }}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.96, y: 12 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.96, y: 12 }}
-              role="alertdialog"
-              aria-modal="true"
-              aria-labelledby="disconnect-title"
-              aria-describedby="disconnect-description"
-              className="w-full max-w-md rounded-lg border border-[#333] bg-[#111] shadow-2xl"
-            >
-              <div className="border-b border-[#2a2a2a] px-5 py-4">
-                <p className="mb-1 text-[9px] font-mono uppercase tracking-[0.25em] text-red-400">Session Control</p>
-                <h2 id="disconnect-title" className="text-lg font-semibold text-white">Disconnect from Aetherion?</h2>
-              </div>
-              <div className="px-5 py-4">
-                <p id="disconnect-description" className="text-sm leading-relaxed text-gray-400">
-                  Your current authenticated session will end and you will return to the authentication page.
-                </p>
-              </div>
-              <div className="flex justify-end gap-3 border-t border-[#2a2a2a] px-5 py-4">
-                <button
-                  type="button"
-                  disabled={isDisconnecting}
-                  onClick={() => setShowDisconnectConfirm(false)}
-                  className="rounded border border-[#444] px-4 py-2 text-xs font-mono uppercase tracking-widest text-gray-300 transition-colors hover:bg-[#222] disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={isDisconnecting}
-                  onClick={handleDisconnect}
-                  className="rounded border border-red-500/50 bg-red-500/15 px-4 py-2 text-xs font-mono uppercase tracking-widest text-red-300 transition-colors hover:bg-red-500/25 disabled:opacity-50"
-                >
-                  {isDisconnecting ? 'Disconnecting…' : 'Disconnect'}
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <main className="p-6 max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        {activeTab === 'chat' && (
-           <div className="lg:col-span-12 max-w-4xl w-full mx-auto py-6">
-             <Chatbot />
-           </div>
-        )}
-
-        {activeTab === 'deepthink' && (
-           <div className="lg:col-span-12 max-w-4xl w-full mx-auto py-6">
-             <HighThinking />
-           </div>
-        )}
-
-        {activeTab === 'dashboard' && (
-          <>
-            {/* Left Column - Globe & Live Map */}
-            <div className="lg:col-span-8 space-y-6">
-              <Card title="Global AQI Distribution" className="h-[520px]" icon={Globe}>
-                <AetherionMap 
-                  data={aqiData} 
-                  showGlobalGrid={showGlobalGrid}
-                  showLethalOnly={showLethalOnly}
-                  focusedCityId={focusedCityId}
-                  setFocusedCityId={setFocusedCityId}
-                />
-              </Card>
-
-              <Card title="Planetary Atmospheric Pulse" icon={Activity}>
-                <div className="h-[300px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={aqiData}>
-                      <defs>
-                        <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
-                          <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#222" vertical={false} />
-                      <XAxis dataKey="location" hide />
-                      <YAxis stroke="#444" fontSize={10} />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#111', border: '1px solid #333', fontSize: '10px' }}
-                        labelStyle={{ color: '#fff', marginBottom: '4px' }}
-                      />
-                      <Area 
-                        type="monotone" 
-                        dataKey="value" 
-                        stroke="#3b82f6" 
-                        strokeWidth={2}
-                        fillOpacity={1} 
-                        fill="url(#colorValue)" 
-                        animationDuration={1500}
-                      />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              </Card>
-            </div>
-
-            {/* Right Column - Station Data & Rankings */}
-            <div className="lg:col-span-4 space-y-6">
-              {/* Urban Focus Detail Panel */}
-              <AnimatePresence>
-                {focusedCityData && (
-                  <motion.div
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
-                    className="mb-6"
-                  >
-                    <Card title="Urban Focus Intelligence" icon={Target} className="border-blue-500/40 bg-blue-900/5">
-                      <div className="space-y-4">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <h3 className="text-2xl font-black uppercase tracking-tighter text-blue-400">
-                              {focusedCityData.city}
-                            </h3>
-                            <p className="text-[10px] text-gray-500 font-mono uppercase tracking-widest">
-                              Planetary Analytics Hub // {focusedCityData.country}
-                            </p>
-                          </div>
-                          <div className="text-right">
-                             <div className={cn(
-                               "text-2xl font-mono font-black",
-                               focusedCityData.value > 150 ? "text-red-500" : "text-green-500"
-                             )}>
-                               {focusedCityData.value.toFixed(0)}
-                             </div>
-                             <p className="text-[9px] text-gray-600 uppercase">Live AQI Index</p>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="p-2 bg-[#000]/40 rounded border border-[#222]">
-                            <p className="text-[8px] text-gray-500 uppercase tracking-tighter mb-1">Global Variance</p>
-                            <p className="text-sm font-mono font-bold text-gray-200">
-                              {stats ? (focusedCityData.value - stats.mean).toFixed(1) : "0.0"}
-                              <span className="text-[10px] ml-1 text-gray-600">pts</span>
-                            </p>
-                          </div>
-                          <div className="p-2 bg-[#000]/40 rounded border border-[#222]">
-                            <p className="text-[8px] text-gray-500 uppercase tracking-tighter mb-1">Pollution Rank</p>
-                            <p className="text-sm font-mono font-bold text-gray-200">
-                              #{[...aqiData].sort((a,b) => b.value - a.value).findIndex(d => d.id === focusedCityId) + 1}
-                              <span className="text-[10px] ml-1 text-gray-600">of {aqiData.length}</span>
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="p-3 bg-blue-500/10 rounded border border-blue-500/20">
-                           <p className="text-[10px] text-blue-300 leading-relaxed font-medium italic">
-                             Automated protocol suggest focused city "{focusedCityData.city}" is currently operating at {focusedCityData.value > (stats?.mean || 0) ? "above-average" : "below-average"} atmospheric toxicity thresholds.
-                           </p>
-                        </div>
-
-                        <button 
-                          onClick={() => setFocusedCityId(null)}
-                          className="w-full py-2 bg-[#111] border border-[#222] text-[10px] uppercase font-bold tracking-widest hover:bg-blue-600 hover:text-white transition-all rounded"
-                        >
-                          Clear Tactical Focus
-                        </button>
-                      </div>
-                    </Card>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* Leaderboard Panel */}
-              <Card title="Global Pollution Leaderboard" icon={AlertCircle}>
-                <div className="space-y-1.5 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar">
-                  {loading ? (
-                    <div className="py-10 text-center text-gray-600 animate-pulse font-mono text-[9px] uppercase">Mapping Global Peaks...</div>
-                  ) : topPolluted.map((node, i) => (
-                    <button 
-                      key={node.id} 
-                      onClick={() => setFocusedCityId(node.id)}
-                      className={cn(
-                        "w-full flex items-center justify-between p-2 rounded border transition-all group",
-                        focusedCityId === node.id ? "bg-blue-600/20 border-blue-500/50" : "bg-[#1a1a1a] border-transparent hover:border-red-500/30"
-                      )}
-                    >
-                       <div className="flex items-center gap-3">
-                          <span className="text-[10px] font-mono text-gray-700 w-4">{i + 1}.</span>
-                          <div className="flex flex-col text-left">
-                             <span className={cn(
-                               "text-[11px] font-bold group-hover:text-red-400 transition-colors uppercase leading-none mb-1",
-                               focusedCityId === node.id ? "text-blue-400" : "text-gray-200"
-                             )}>
-                               {node.location || node.city}
-                             </span>
-                             <span className="text-[8px] text-gray-500 uppercase font-mono">{node.country} // {node.source}</span>
-                          </div>
-                       </div>
-                       <div className="text-right">
-                          <span className={cn(
-                            "text-[12px] font-mono font-black",
-                            node.value > 150 ? "text-red-500" : "text-green-500"
-                          )}>{node.value.toFixed(0)}</span>
-                          <span className="block text-[7px] text-gray-600 uppercase">Index.v5</span>
-                       </div>
-                    </button>
-                  ))}
-                </div>
-              </Card>
-
-              {/* High Risk Critical Panel */}
-              <AnimatePresence>
-                {highRiskCities.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    className="space-y-4"
-                  >
-                    <Card title="Critical Health Advisory" icon={ShieldCheck} className="border-red-500/40 bg-red-900/5">
-                      <div className="space-y-3">
-                        <div className="flex items-start gap-4 p-3 bg-red-500/10 border border-red-500/20 rounded">
-                           <AlertCircle size={20} className="text-red-500 shrink-0 mt-0.5" />
-                           <div>
-                              <p className="text-[11px] font-bold text-red-400 uppercase tracking-widest mb-1">Hazardous Nodes Detected</p>
-                              <p className="text-[10px] text-gray-300 leading-relaxed">
-                                Persistent hazardous thresholds exceeded in {highRiskCities.length} monitored regions. Emergency masks and indoor containment protocols activated.
-                              </p>
-                           </div>
-                        </div>
-
-                        <div className="space-y-2">
-                           <p className="text-[9px] text-gray-500 uppercase font-mono tracking-widest mb-1">Hazard Leaderboard:</p>
-                           {highRiskCities.slice(0, 4).map(city => (
-                             <div key={city.id} className="flex justify-between items-center text-[10px] bg-[#000]/30 p-1.5 px-2 rounded border border-[#222]">
-                                <span className="font-bold text-gray-200">{city.location}</span>
-                                <div className="flex items-center gap-3">
-                                   <span className="text-red-500 font-mono font-bold">{city.value.toFixed(0)}</span>
-                                   <span className="px-1 py-0.5 bg-red-500/10 text-red-500 text-[8px] uppercase font-bold rounded">
-                                     {city.value >= 300 ? "Hazardous" : "Severe"}
-                                   </span>
-                                </div>
-                             </div>
-                           ))}
-                        </div>
-                      </div>
-                    </Card>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* Suggestions Panel */}
-              <Card title="Recommended Protocols" icon={ShieldCheck}>
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    {recommendedActions.length > 0 ? (
-                      recommendedActions.map((action, i) => (
-                        <div key={i} className="flex gap-3 items-start p-3 bg-[#111] border border-[#222] rounded hover:border-blue-500/30 transition-all">
-                           <ShieldCheck size={14} className="text-blue-500 shrink-0 mt-0.5" />
-                           <p className="text-[11px] leading-relaxed text-gray-300">{action}</p>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="p-4 text-center border border-dashed border-[#222] rounded">
-                         <ShieldCheck size={20} className="text-gray-700 mx-auto mb-2" />
-                         <p className="text-[10px] text-gray-600 font-mono uppercase">Optimized Air Quality: Standard Operations</p>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="h-px bg-[#222]" />
-                  
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="text-gray-500 uppercase tracking-tighter">AI Advisory Confidence</span>
-                    <span className="font-mono text-blue-400">0.962α</span>
-                  </div>
-                </div>
-              </Card>
-
-              <Card title="Planetary Insights" icon={Brain}>
-                <div className="space-y-4">
-                  <div className="flex gap-3">
-                    <div className="p-2 bg-blue-500/10 rounded-sm self-start">
-                      <Info size={14} className="text-blue-500" />
-                    </div>
-                    <div className="text-[11px] leading-relaxed text-gray-400">
-                      The <span className="text-blue-400">Aetherion Engine</span> detects a {stats && stats.skewness > 0 ? "positive skew" : "negative skew"} in global AQI distributions. This suggests {stats && stats.skewness > 0 ? "isolated high-pollution hotspots" : "broad areas of atmospheric stability"} across the tracked planetary hubs.
-                    </div>
-                  </div>
-                </div>
-              </Card>
-            </div>
-          </>
-        )}
-
-        {activeTab === 'decision-engine' && <DecisionEngine aqiData={aqiData} lastSync={lastAqiSync} />}
-
-      </main>
-
-      <footer className="mt-20 border-t border-[#222] p-6 text-center">
-        <p className="text-[9px] text-gray-600 font-mono uppercase tracking-[0.4em]">
-          AETHERION // v1.0.4-BETA // NODE_ID::AIS_CORE_SEA_1
-        </p>
-      </footer>
-
-      {/* Grid Overlay for atmosphere */}
-      <div className="fixed inset-0 pointer-events-none opacity-[0.03] z-[-1]" 
-           style={{ backgroundImage: 'linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)', backgroundSize: '40px 40px' }} />
-    </div>
-  );
+    <footer><span>Aetherion AQI</span><span>Observation: {formatObservation(selected?.lastUpdated)} · API sync: {formatObservation(lastSync)} · {meta.monitoredLocations || data.length} locations</span></footer>
+    {showDisconnect && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-labelledby="disconnect-title"><div className="modal-icon"><LogOut size={22}/></div><h2 id="disconnect-title">Sign out of Aetherion?</h2><p>You will return to the welcome screen. Favorites saved on this device will remain.</p><div><button className="secondary-button" onClick={() => setShowDisconnect(false)}>Cancel</button><button className="danger-button" onClick={disconnect}>Sign out</button></div></div></div>}
+  </div>;
 }

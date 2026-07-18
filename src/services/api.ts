@@ -14,8 +14,6 @@ async function postAi<T>(path: string, body: unknown): Promise<T> {
 }
 
 export const aiApi = {
-  chat: (message: string, history: Array<{ role: string; content: string }>) =>
-    postAi<{ text: string }>('/api/ai/chat', { message, history }),
-  strategy: (objective: string) => postAi<{ text: string }>('/api/ai/strategy', { objective }),
-  recommendation: (simulation: unknown) => postAi<{ text: string }>('/api/ai/recommendation', { simulation }),
+  chat: (message: string, history: Array<{ role: string; content: string }>, context?: unknown) =>
+    postAi<{ text: string }>('/api/ai/chat', { message, history, context }),
 };
