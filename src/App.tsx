@@ -122,7 +122,7 @@ export default function App() {
     const interval = window.setInterval(() => fetchData(false, false), 5 * 60 * 1000);
     return () => window.clearInterval(interval);
   }, []);
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  useEffect(() => auth ? onAuthStateChanged(auth, setUser) : undefined, []);
   useEffect(() => { localStorage.setItem('aetherion:favorites', JSON.stringify(favorites)); }, [favorites]);
   useEffect(() => { localStorage.setItem('aetherion:compare', JSON.stringify(compareIds)); }, [compareIds]);
 
@@ -158,7 +158,15 @@ export default function App() {
     try { await loginWithGoogle(); closeIntro(); }
     catch (cause: unknown) {
       const code = typeof cause === 'object' && cause !== null && 'code' in cause && typeof cause.code === 'string' ? cause.code : '';
-      if (code !== 'auth/popup-closed-by-user') setAuthError(code === 'auth/unauthorized-domain' ? `Add ${window.location.hostname} to Firebase Authorized domains.` : 'Google sign-in did not complete. Please try again.');
+      if (code !== 'auth/popup-closed-by-user') {
+        setAuthError(
+          code === 'auth/unauthorized-domain'
+            ? `Add ${window.location.hostname} to Firebase Authorized domains.`
+            : code === 'auth/not-configured'
+              ? 'Google sign-in is not configured for this build. The public AQI dashboard is still available.'
+              : 'Google sign-in did not complete. Please try again.',
+        );
+      }
     } finally { setAuthBusy(false); }
   };
   const disconnect = async () => { await logout(); setShowDisconnect(false); setActiveTab('overview'); setShowIntro(true); sessionStorage.removeItem('aetherion:intro-seen'); };

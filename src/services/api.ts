@@ -1,7 +1,7 @@
 import { auth } from '../firebase';
 
 async function postAi<T>(path: string, body: unknown): Promise<T> {
-  const token = await auth.currentUser?.getIdToken();
+  const token = await auth?.currentUser?.getIdToken();
   if (!token) throw new Error('Sign in to use AI intelligence features.');
   const response = await fetch(path, {
     method: 'POST',

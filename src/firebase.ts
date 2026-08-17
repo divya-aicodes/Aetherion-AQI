@@ -1,6 +1,6 @@
 import { initializeApp, type FirebaseOptions } from 'firebase/app';
-import { getAuth, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, type Auth } from 'firebase/auth';
+import { getFirestore, type Firestore } from 'firebase/firestore';
 
 const firebaseConfig: FirebaseOptions = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -12,13 +12,29 @@ const firebaseConfig: FirebaseOptions = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
-const app = initializeApp(firebaseConfig);
-export const db = import.meta.env.VITE_FIREBASE_DATABASE_ID
-  ? getFirestore(app, import.meta.env.VITE_FIREBASE_DATABASE_ID)
-  : getFirestore(app);
-export const auth = getAuth(app);
+export const firebaseConfigured = Boolean(
+  firebaseConfig.apiKey
+  && firebaseConfig.authDomain
+  && firebaseConfig.projectId
+  && firebaseConfig.appId,
+);
+
+const app = firebaseConfigured ? initializeApp(firebaseConfig) : null;
+export const db: Firestore | null = app
+  ? import.meta.env.VITE_FIREBASE_DATABASE_ID
+    ? getFirestore(app, import.meta.env.VITE_FIREBASE_DATABASE_ID)
+    : getFirestore(app)
+  : null;
+export const auth: Auth | null = app ? getAuth(app) : null;
 
 export const loginWithGoogle = async () => {
+  if (!auth) {
+    throw Object.assign(
+      new Error('Google sign-in is not configured for this build.'),
+      { code: 'auth/not-configured' as const },
+    );
+  }
+
   try {
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({
@@ -32,6 +48,8 @@ export const loginWithGoogle = async () => {
 };
 
 export const logout = async () => {
+  if (!auth) return;
+
   try {
     await signOut(auth);
   } catch (error: unknown) {
