@@ -15,8 +15,10 @@ import GooeyNav from './components/reactbits/GooeyNav';
 import ShinyText from './components/reactbits/ShinyText';
 import IntroPage from './IntroPage';
 import { auth, loginWithGoogle, logout } from './firebase';
+import { getForecastMetrics } from './lib/forecast-metrics';
 import { getAqiCategory } from './lib/aqi';
-import type { AQIData, AqiForecastPoint } from './types';
+import { matchesLocation } from './lib/location-search';
+import type { AQIData, AqiForecastPoint, AqiLiveMeta, AqiLiveResponse } from './lib/types';
 
 const AetherionMap = lazy(() => import('./components/AetherionMap'));
 const Chatbot = lazy(() => import('./components/Chatbot'));
@@ -56,13 +58,13 @@ function freshness(value?: string | null) {
   return `Updated ${minutes} min ago`;
 }
 
-function forecastMetrics(points: AqiForecastPoint[]) {
-  if (!points.length) return null;
-  const average = Math.round(points.reduce((sum, point) => sum + point.aqi, 0) / points.length);
-  const peak = points.reduce((best, point) => point.aqi > best.aqi ? point : best);
-  const lowest = points.reduce((best, point) => point.aqi < best.aqi ? point : best);
-  const change = Math.round(points[points.length - 1].aqi - points[0].aqi);
-  return { average, peak, lowest, change };
+function readStoredIds(key: string): string[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 function AqiBadge({ value }: { value: number }) {
@@ -80,13 +82,13 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState<string | null>(null);
-  const [meta, setMeta] = useState<{ monitoredLocations?: number }>({});
+  const [meta, setMeta] = useState<Partial<AqiLiveMeta>>({});
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [cityFilter, setCityFilter] = useState<CityFilter>('all');
-  const [favorites, setFavorites] = useState<string[]>(() => JSON.parse(localStorage.getItem('aetherion:favorites') || '[]'));
-  const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [favorites, setFavorites] = useState<string[]>(() => readStoredIds('aetherion:favorites'));
+  const [compareIds, setCompareIds] = useState<string[]>(() => readStoredIds('aetherion:compare'));
   const [forecast, setForecast] = useState<AqiForecastPoint[]>([]);
   const [forecastLoading, setForecastLoading] = useState(false);
   const [user, setUser] = useState<User | null>(null);
@@ -95,16 +97,18 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  const fetchData = async (initial = false) => {
-    initial ? setLoading(true) : setRefreshing(true);
+  const fetchData = async (initial = false, force = false) => {
+    if (initial) setLoading(true);
+    else setRefreshing(true);
     setError(null);
     try {
-      const response = await axios.get('/api/aqi/live', { headers: { 'Cache-Control': 'no-cache' } });
-      const readings: AQIData[] = response.data.results || [];
+      const response = await axios.get<AqiLiveResponse>('/api/aqi/live', force ? { headers: { 'Cache-Control': 'no-cache' } } : undefined);
+      const readings = response.data.results || [];
       setData(readings);
       setMeta(response.data.meta || {});
       setLastSync(response.data.meta?.timestamp || new Date().toISOString());
-      setSelectedId(current => current && readings.some(item => item.id === current) ? current : readings[0]?.id || null);
+      setSelectedId(current => current && readings.some(item => item.id === current) ? current : null);
+      setCompareIds(current => current.filter(id => readings.some(item => item.id === id)).slice(0, 5));
     } catch {
       setError('Current air-quality data could not be refreshed. Your last successful results remain visible.');
     } finally {
@@ -115,11 +119,12 @@ export default function App() {
 
   useEffect(() => {
     fetchData(true);
-    const interval = window.setInterval(() => fetchData(false), 5 * 60 * 1000);
+    const interval = window.setInterval(() => fetchData(false, false), 5 * 60 * 1000);
     return () => window.clearInterval(interval);
   }, []);
   useEffect(() => onAuthStateChanged(auth, setUser), []);
   useEffect(() => { localStorage.setItem('aetherion:favorites', JSON.stringify(favorites)); }, [favorites]);
+  useEffect(() => { localStorage.setItem('aetherion:compare', JSON.stringify(compareIds)); }, [compareIds]);
 
   const selected = data.find(item => item.id === selectedId) || data[0];
   useEffect(() => {
@@ -132,25 +137,28 @@ export default function App() {
   }, [selected?.city]);
 
   const filtered = useMemo(() => {
-    const text = query.trim().toLowerCase();
     return data
-      .filter(item => !text || `${item.city} ${item.country}`.toLowerCase().includes(text))
+      .filter(item => matchesLocation(item, query))
       .filter(item => cityFilter === 'all' || cityFilter === 'favorites' && favorites.includes(item.id) || cityFilter === 'unhealthy' && item.value > 100)
       .sort((a, b) => Number(favorites.includes(b.id)) - Number(favorites.includes(a.id)) || b.value - a.value);
   }, [cityFilter, data, favorites, query]);
 
   const category = selected ? getAqiCategory(selected.value) : null;
-  const outlook = forecastMetrics(forecast);
+  const outlook = getForecastMetrics(forecast);
   const readingAge = minutesSince(selected?.lastUpdated);
+  const displayedStaleAge = meta.stale ? meta.staleAgeMinutes ?? readingAge ?? 0 : readingAge ?? 0;
+  const topRankedCity = useMemo(() => data.length ? [...data].sort((a, b) => b.value - a.value)[0] : undefined, [data]);
+  const assistantContextReading = data.find(item => item.id === selectedId) ?? topRankedCity;
   const toggleFavorite = (id: string) => setFavorites(items => items.includes(id) ? items.filter(item => item !== id) : [...items, id]);
-  const toggleCompare = (id: string) => setCompareIds(items => items.includes(id) ? items.filter(item => item !== id) : items.length < 3 ? [...items, id] : items);
+  const toggleCompare = (id: string) => setCompareIds(items => items.includes(id) ? items.filter(item => item !== id) : items.length < 5 ? [...items, id] : items);
   const chooseCity = (id: string) => { setSelectedId(id); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const closeIntro = () => { sessionStorage.setItem('aetherion:intro-seen', 'yes'); setShowIntro(false); };
   const signIn = async () => {
     setAuthBusy(true); setAuthError(null);
     try { await loginWithGoogle(); closeIntro(); }
-    catch (cause: any) {
-      if (cause?.code !== 'auth/popup-closed-by-user') setAuthError(cause?.code === 'auth/unauthorized-domain' ? `Add ${window.location.hostname} to Firebase Authorized domains.` : 'Google sign-in did not complete. Please try again.');
+    catch (cause: unknown) {
+      const code = typeof cause === 'object' && cause !== null && 'code' in cause && typeof cause.code === 'string' ? cause.code : '';
+      if (code !== 'auth/popup-closed-by-user') setAuthError(code === 'auth/unauthorized-domain' ? `Add ${window.location.hostname} to Firebase Authorized domains.` : 'Google sign-in did not complete. Please try again.');
     } finally { setAuthBusy(false); }
   };
   const disconnect = async () => { await logout(); setShowDisconnect(false); setActiveTab('overview'); setShowIntro(true); sessionStorage.removeItem('aetherion:intro-seen'); };
@@ -164,13 +172,13 @@ export default function App() {
     </header>
 
     <main className="main-content">
-      <div className="page-heading"><div><span className="eyebrow"><span className={error ? 'status-dot error' : 'status-dot'}/><ShinyText text={error ? 'Data connection interrupted' : 'Live city overview'} color={error ? '#d8757d' : '#6f829a'} shineColor={error ? '#ffd2d5' : '#dbeafe'}/></span><BlurText key={activeTab} as="h1" text={activeTab === 'overview' ? 'Air quality at a glance' : tabs.find(tab => tab.id === activeTab)?.label || ''} delay={45}/><p>{pageDescriptions[activeTab]} · {data.length} locations · Open-Meteo</p></div><button className="refresh-button" onClick={() => fetchData(false)} disabled={refreshing}><RefreshCw size={16} className={refreshing ? 'spin' : ''}/>{refreshing ? 'Refreshing' : 'Refresh data'}</button></div>
+      <div className="page-heading"><div><span className="eyebrow"><span className={error || meta.stale ? 'status-dot error' : 'status-dot'}/><ShinyText text={error ? 'Data connection interrupted' : meta.stale ? 'Last known data' : 'Live city overview'} color={error || meta.stale ? '#d8b45f' : '#6f829a'} shineColor={error || meta.stale ? '#fff1b8' : '#dbeafe'}/></span><BlurText key={activeTab} as="h1" text={activeTab === 'overview' ? 'Air quality at a glance' : tabs.find(tab => tab.id === activeTab)?.label || ''} delay={45}/><p>{pageDescriptions[activeTab]} · {data.length} locations · Open-Meteo</p></div><button className="refresh-button" onClick={() => fetchData(false, true)} disabled={refreshing}><RefreshCw size={16} className={refreshing ? 'spin' : ''}/>{refreshing ? 'Refreshing' : 'Refresh data'}</button></div>
       {error && <div className="error-banner"><AlertTriangle size={17}/>{error}</div>}
 
       {loading ? <div className="loading-state"><Loader2 className="spin"/>Loading current air quality…</div> : <>
         {activeTab === 'overview' && selected && category && <div className="stack">
           <DataNotice/>
-          {readingAge !== null && readingAge > 90 && <div className="stale-banner"><Clock3 size={16}/><span>This modeled observation is {readingAge} minutes old. Check the timestamp before making time-sensitive decisions.</span></div>}
+          {(meta.stale || readingAge !== null && readingAge > 90) && <div className="stale-banner"><Clock3 size={16}/><span>Data {displayedStaleAge} min old. {meta.warning || 'Refresh before making time-sensitive decisions.'}</span><button onClick={() => fetchData(false, true)} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'spin' : ''}/>{refreshing ? 'Updating…' : 'Refresh now'}</button></div>}
           <section className="hero-grid">
             <BorderGlow className="current-glow" edgeSensitivity={24} glowColor="215 90 70" animated colors={[category.color, '#3b82f6', '#34d399']}><article className="current-card" style={{ '--aqi-color': category.color } as React.CSSProperties}>
               <div className="city-picker"><Search size={16}/><select value={selected.id} onChange={event => setSelectedId(event.target.value)} aria-label="Choose a city">{data.map(item => <option key={item.id} value={item.id}>{item.city}, {item.country}</option>)}</select><button onClick={() => toggleFavorite(selected.id)} aria-label={favorites.includes(selected.id) ? 'Remove favorite' : 'Add favorite'}><Star size={18} fill={favorites.includes(selected.id) ? 'currentColor' : 'none'}/></button></div>
@@ -192,7 +200,7 @@ export default function App() {
 
         {activeTab === 'map' && <div className="map-page"><DataNotice/><Suspense fallback={<div className="loading-state"><Loader2 className="spin"/>Loading map…</div>}><AetherionMap data={data} focusedCityId={selectedId} setFocusedCityId={setSelectedId} comparedIds={compareIds} onToggleCompare={toggleCompare} onViewOutlook={id => { setSelectedId(id); setActiveTab('overview'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}/></Suspense></div>}
         {activeTab === 'compare' && <div className="stack"><DataNotice/><CityCompare data={data} favorites={favorites} selectedIds={compareIds} onToggle={toggleCompare}/></div>}
-        {activeTab === 'assistant' && <div className="assistant-page"><DataNotice/><div className="assistant-intro"><ShieldCheck size={22}/><div><h2>Ask about {selected?.city || 'air quality'}</h2><p>The assistant receives the selected reading and timestamp. It explains—not diagnoses—and does not replace official alerts.</p></div></div><Suspense fallback={<div className="loading-state"><Loader2 className="spin"/>Loading assistant…</div>}><Chatbot onSignIn={signIn} context={selected ? { city: selected.city, country: selected.country, aqi: selected.value, pm25: selected.pm25, observedAt: selected.lastUpdated, source: selected.source } : undefined}/></Suspense></div>}
+        {activeTab === 'assistant' && <div className="assistant-page"><DataNotice/><div className="assistant-intro"><ShieldCheck size={22}/><div><h2>Ask about {assistantContextReading?.city || 'air quality'}</h2><p>{selectedId ? 'The assistant receives the selected reading and timestamp.' : 'No city was selected, so the highest-ranked current AQI is used automatically.'} It explains—not diagnoses—and does not replace official alerts.</p></div></div><Suspense fallback={<div className="loading-state"><Loader2 className="spin"/>Loading assistant…</div>}><Chatbot onSignIn={signIn} context={assistantContextReading ? { city: assistantContextReading.city, country: assistantContextReading.country, aqi: assistantContextReading.value, pm25: assistantContextReading.pm25, observedAt: assistantContextReading.lastUpdated, source: assistantContextReading.source } : undefined}/></Suspense></div>}
       </>}
     </main>
 

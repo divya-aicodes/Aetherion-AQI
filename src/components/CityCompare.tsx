@@ -3,20 +3,13 @@ import axios from 'axios';
 import { Activity, Award, Check, Clock3, Loader2, MapPin, Search, Sparkles, TrendingDown, TrendingUp, Wind, X } from 'lucide-react';
 import { Area, AreaChart, ResponsiveContainer, YAxis } from 'recharts';
 import { getAqiCategory } from '../lib/aqi';
-import type { AQIData, AqiForecastPoint } from '../types';
+import { getForecastMetrics } from '../lib/forecast-metrics';
+import { matchesLocation, normalizeLocationSearch } from '../lib/location-search';
+import type { AQIData, AqiDetailResponse, AqiForecastPoint } from '../lib/types';
 
 const SUGGESTED_CITIES = ['New Delhi', 'Mumbai', 'Bengaluru', 'Chennai', 'Hyderabad', 'Kolkata', 'Pune', 'Jaipur'];
 
 type ForecastState = Record<string, { loading: boolean; points: AqiForecastPoint[]; error?: boolean }>;
-
-function metrics(points: AqiForecastPoint[]) {
-  if (!points.length) return null;
-  const average = Math.round(points.reduce((sum, point) => sum + point.aqi, 0) / points.length);
-  const peak = points.reduce((best, point) => point.aqi > best.aqi ? point : best);
-  const lowest = points.reduce((best, point) => point.aqi < best.aqi ? point : best);
-  const change = Math.round(points[points.length - 1].aqi - points[0].aqi);
-  return { average, peak, lowest, change };
-}
 
 function Badge({ value }: { value: number }) {
   const category = getAqiCategory(value);
@@ -35,17 +28,19 @@ export default function CityCompare({ data, favorites, selectedIds, onToggle }: 
   const selected = selectedIds.map(id => data.find(item => item.id === id)).filter(Boolean) as AQIData[];
 
   useEffect(() => {
-    selected.forEach(item => {
+    selectedIds.forEach(id => {
+      const item = data.find(candidate => candidate.id === id);
+      if (!item) return;
       if (forecasts[item.id]) return;
       setForecasts(current => ({ ...current, [item.id]: { loading: true, points: [] } }));
-      axios.get('/api/aqi/detail', { params: { city: item.city } })
+      axios.get<AqiDetailResponse>('/api/aqi/detail', { params: { city: item.city } })
         .then(response => setForecasts(current => ({ ...current, [item.id]: { loading: false, points: response.data.forecast || [] } })))
         .catch(() => setForecasts(current => ({ ...current, [item.id]: { loading: false, points: [], error: true } })));
     });
-  }, [selectedIds.join('|')]);
+  }, [data, forecasts, selectedIds]);
 
   const choices = useMemo(() => {
-    const search = query.trim().toLowerCase();
+    const search = normalizeLocationSearch(query);
     return [...data]
       .sort((a, b) => {
         const favoriteDifference = Number(favorites.includes(b.id)) - Number(favorites.includes(a.id));
@@ -58,25 +53,25 @@ export default function CityCompare({ data, favorites, selectedIds, onToggle }: 
         return a.city.localeCompare(b.city);
       })
       .filter(item => !selectedIds.includes(item.id))
-      .filter(item => !search || `${item.city} ${item.country}`.toLowerCase().includes(search))
+      .filter(item => matchesLocation(item, search))
       .slice(0, search ? 10 : 8);
   }, [data, favorites, query, selectedIds]);
 
-  const analyzed = selected.map(item => ({ item, forecast: forecasts[item.id], stats: metrics(forecasts[item.id]?.points || []) }));
+  const analyzed = selected.map(item => ({ item, forecast: forecasts[item.id], stats: getForecastMetrics(forecasts[item.id]?.points || []) }));
   const ready = analyzed.filter(entry => entry.stats);
   const winner = ready.length >= 2 ? [...ready].sort((a, b) => ((a.stats!.average * .65) + (a.item.value * .35)) - ((b.stats!.average * .65) + (b.item.value * .35)))[0] : null;
   const cleanestPm25 = selected.length >= 2 ? [...selected].sort((a, b) => a.pm25 - b.pm25)[0] : null;
   const currentSpread = selected.length >= 2 ? Math.round(Math.max(...selected.map(item => item.value)) - Math.min(...selected.map(item => item.value))) : 0;
 
   return <section className="panel compare-panel">
-    <div className="panel-title"><div><span className="eyebrow">Decision comparison</span><h2>Current air and the next 24 hours</h2></div><span>{selected.length}/3 selected</span></div>
+    <div className="panel-title"><div><span className="eyebrow">Decision comparison</span><h2>Current air and the next 24 hours</h2></div><span>{selected.length}/5 selected</span></div>
 
     <div className="compare-selector">
-      <div className="selected-cities" aria-label="Selected cities">{[0, 1, 2].map(index => { const item = selected[index]; return item ? <div className="selected-city" key={item.id}><span><Check size={14}/><span><b>{item.city}</b><small>{item.country}</small></span></span><button onClick={() => { onToggle(item.id); setPickerExpanded(true); }} aria-label={`Remove ${item.city}`}><X size={15}/></button></div> : <div className="selected-city empty" key={index}><span>{index + 1}</span><span>Choose a city</span></div>; })}</div>
+      <div className="selected-cities" aria-label="Selected cities">{[0, 1, 2, 3, 4].map(index => { const item = selected[index]; return item ? <div className="selected-city" key={item.id}><span><Check size={14}/><span><b>{item.city}</b><small>{item.country}</small></span></span><button onClick={() => { onToggle(item.id); setPickerExpanded(true); }} aria-label={`Remove ${item.city}`}><X size={15}/></button></div> : <div className="selected-city empty" key={index}><span>{index + 1}</span><span>Choose a city</span></div>; })}</div>
       {selected.length < 2 || pickerExpanded ? <>
         <label className="compare-search"><Search size={17}/><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by city or country…" aria-label="Search cities to compare"/>{query && <button onClick={() => setQuery('')} aria-label="Clear city search"><X size={15}/></button>}</label>
-        <div className="choice-heading"><span>{query ? `Results for “${query}”` : favorites.length ? 'Favorites and suggested cities' : 'Suggested cities'}</span><small>{selectedIds.length >= 3 ? 'Remove one city to choose another' : 'Tap a city to add it'}</small></div>
-        <div className="city-choices">{choices.length ? choices.map(item => { const category = getAqiCategory(item.value); return <button key={item.id} onClick={() => { onToggle(item.id); setQuery(''); if (selectedIds.length >= 1) setPickerExpanded(false); }} disabled={selectedIds.length >= 3}><span><MapPin size={14}/><span><b>{item.city}</b><small>{item.country}</small></span></span><strong style={{ color: category.color }}>{Math.round(item.value)} <small>AQI</small></strong><span className="add-city">+</span></button>; }) : <p>No matching city found. Try a different spelling.</p>}</div>
+        <div className="choice-heading"><span>{query ? `Results for “${query}”` : favorites.length ? 'Favorites and suggested cities' : 'Suggested cities'}</span><small>{selectedIds.length >= 5 ? 'Remove one city to choose another' : 'Tap a city to add it'}</small></div>
+        <div className="city-choices">{choices.length ? choices.map(item => { const category = getAqiCategory(item.value); return <button key={item.id} onClick={() => { onToggle(item.id); setQuery(''); if (selectedIds.length >= 1) setPickerExpanded(false); }} disabled={selectedIds.length >= 5}><span><MapPin size={14}/><span><b>{item.city}</b><small>{item.country}</small></span></span><strong style={{ color: category.color }}>{Math.round(item.value)} <small>AQI</small></strong><span className="add-city">+</span></button>; }) : <p>No matching city found. Try a different spelling.</p>}</div>
       </> : <button className="change-cities" onClick={() => setPickerExpanded(true)}><Search size={15}/> Add or change a city</button>}
     </div>
 

@@ -3,11 +3,10 @@ import { Bot, Loader2, LockKeyhole, LogIn, Send, User } from 'lucide-react';
 import Markdown from 'react-markdown';
 import { auth } from '../firebase';
 import { aiApi } from '../services/api';
+import type { AssistantContext } from '../lib/types';
 
 interface Message { role: 'user' | 'model'; content: string }
-interface Context { city: string; country: string; aqi: number; pm25?: number; observedAt: string; source: string }
-
-export default function Chatbot({ context, onSignIn }: { context?: Context; onSignIn: () => void }) {
+export default function Chatbot({ context, onSignIn }: { context?: AssistantContext; onSignIn: () => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
