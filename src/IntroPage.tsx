@@ -4,7 +4,7 @@ import { ArrowRight, Bot, CloudSun, Database, Key, Map, ShieldCheck, Wind } from
 import type { User } from 'firebase/auth';
 import CountUp from './components/reactbits/CountUp';
 import Lightfall from './components/reactbits/Lightfall';
-import type { AQIData } from './types';
+import type { AQIData } from './lib/types';
 
 const INTRO_LIGHT_COLORS = ['#60a5fa', '#2563eb', '#34d399'];
 

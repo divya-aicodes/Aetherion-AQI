@@ -1,8 +1,4 @@
-export type AqiCategory = {
-  label: 'Good' | 'Moderate' | 'Unhealthy for Sensitive Groups' | 'Unhealthy' | 'Very Unhealthy' | 'Hazardous';
-  color: string;
-  advisory: string;
-};
+import type { AqiCategory } from './types';
 
 // US EPA AQI breakpoints for 24-hour PM2.5 concentrations (µg/m³).
 const PM25_BREAKPOINTS = [

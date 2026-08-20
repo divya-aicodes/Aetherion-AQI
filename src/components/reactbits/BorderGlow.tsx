@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 
 type GlowStyle = CSSProperties & Record<`--${string}`, string | number>;
-function parseHsl(value: string) { const match = value.match(/([\d.]+)\s*([\d.]+)%?\s*([\d.]+)%?/); return match ? { h: +match[1], s: +match[2], l: +match[3] } : { h: 215, s: 90, l: 70 }; }
+export function parseHsl(value: string) {
+  const match = value.match(/(?:hsla?\(\s*)?(-?\d+(?:\.\d+)?)\s*[,\s]+\s*(-?\d+(?:\.\d+)?)%?\s*[,\s]+\s*(-?\d+(?:\.\d+)?)%?/i);
+  if (!match) return { h: 215, s: 90, l: 70 };
+  const clamp = (number: number) => Math.min(100, Math.max(0, number));
+  return { h: ((Number(match[1]) % 360) + 360) % 360, s: clamp(Number(match[2])), l: clamp(Number(match[3])) };
+}
 
 export default function BorderGlow({ children, className = '', edgeSensitivity = 30, glowColor = '215 90 70', backgroundColor = '#11151c', borderRadius = 14, glowRadius = 28, animated = false, colors = ['#2563eb', '#38bdf8', '#34d399'] }: { children: ReactNode; className?: string; edgeSensitivity?: number; glowColor?: string; backgroundColor?: string; borderRadius?: number; glowRadius?: number; animated?: boolean; colors?: string[] }) {
   const ref = useRef<HTMLDivElement>(null);

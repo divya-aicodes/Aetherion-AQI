@@ -1,13 +1,18 @@
 import { motion, useReducedMotion } from 'motion/react';
 import { createElement, useEffect, useMemo, useRef, useState, type ElementType } from 'react';
 
-type Snapshot = Record<string, string | number>;
+interface Snapshot {
+  filter: string;
+  opacity: number;
+  y: number;
+}
 
 function buildKeyframes(from: Snapshot, steps: Snapshot[]) {
-  const keys = new Set([...Object.keys(from), ...steps.flatMap(step => Object.keys(step))]);
-  const keyframes: Record<string, Array<string | number | undefined>> = {};
-  keys.forEach(key => { keyframes[key] = [from[key], ...steps.map(step => step[key])]; });
-  return keyframes;
+  return {
+    filter: [from.filter, ...steps.map(step => step.filter)],
+    opacity: [from.opacity, ...steps.map(step => step.opacity)],
+    y: [from.y, ...steps.map(step => step.y)],
+  };
 }
 
 export default function BlurText({ text = '', delay = 70, className = '', animateBy = 'words', direction = 'top', threshold = .1, rootMargin = '0px', stepDuration = .28, as = 'p' }: {

@@ -22,8 +22,8 @@ The Express server caches the city feed for five minutes, does not fabricate fai
 
 1. Install Node.js 20 or later.
 2. Run `npm install`.
-3. Copy `.env.example` to `.env.local` and add `GEMINI_API_KEY` if you want to use the assistant.
-4. Enable Google sign-in in Firebase and add `localhost` to **Authentication → Settings → Authorized domains**.
+3. Copy `.env.example` to `.env.local` and set the `VITE_FIREBASE_*` project values. Add `GEMINI_API_KEY` and the matching server-side `FIREBASE_API_KEY` if you want to use the assistant.
+4. Enable Google sign-in in Firebase and add `localhost` to **Authentication → Settings → Authorized domains**. Never commit `.env.local`.
 5. Run `npm run dev`.
 6. Open `http://localhost:3000`.
 
@@ -31,7 +31,9 @@ The public AQI dashboard does not require sign-in. Authentication protects the A
 
 ## Quality checks
 
-`npm run check` runs TypeScript validation, unit tests, and a production build.
+`npm run check` runs strict TypeScript validation, ESLint, unit tests with coverage thresholds, and a production build.
+
+The API returns last-known-good readings with an explicit stale-data warning when Open-Meteo is temporarily unavailable. See [DESIGN.md](./DESIGN.md) for the architecture, data-flow contract, and contribution workflow.
 
 ## Production notes
 

@@ -117,3 +117,11 @@ footer { max-width:1440px; margin:auto; padding:20px 24px 32px; border-top:1px s
 .intro-hero > * { min-width:0; }
 @media(max-width:1100px) and (min-width:901px){.intro-hero { grid-template-columns:1fr; gap:48px; }.intro-preview { width:min(680px,100%); transform:none; }}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}.lightfall-container{display:none}.border-glow-card::before,.border-glow-card::after,.border-glow-card>.edge-light{display:none}}
+
+/* Five-city comparison and actionable freshness state */
+.selected-cities { grid-template-columns:repeat(5,minmax(0,1fr)); }
+.comparison-grid { grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); }
+.stale-banner span { flex:1; }
+.stale-banner button { display:flex; align-items:center; gap:6px; flex:none; border:1px solid #846f2d; background:#3a300f; color:#ffe48a; border-radius:7px; padding:7px 9px; font-size:9px; font-weight:750; }
+@media(max-width:1100px){.selected-cities { grid-template-columns:repeat(3,minmax(0,1fr)); }}
+@media(max-width:650px){.selected-cities { grid-template-columns:1fr; }.stale-banner { align-items:flex-start; flex-wrap:wrap; }.stale-banner button { margin-left:24px; }}

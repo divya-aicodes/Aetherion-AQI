@@ -5,7 +5,11 @@ import path from 'path';
 import axios from 'axios';
 import { GoogleGenAI } from '@google/genai';
 import { pm25ToUsAqi } from './src/lib/aqi.js';
-import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
+import { AuthError, ProviderError, RateLimitError, errorMessage } from './src/lib/errors.js';
+import type { AQIData, AqiForecastPoint } from './src/lib/types.js';
+import { LastKnownGoodCache, loadWithLastKnownGood } from './src/server/last-known-good-cache.js';
+import { parseCurrentResponses, parseHourlyResponse } from './src/server/open-meteo.js';
+import { SlidingWindowRateLimiter } from './src/server/rate-limit.js';
 
 // Match Vite's local-development convention while keeping deployment
 // environments free to provide real process-level secrets.
@@ -80,39 +84,51 @@ const CITIES: Record<string, { coordinates: [number, number]; country: string }>
   'São Paulo': { coordinates: [-23.5505, -46.6333], country: 'Brazil' },
 };
 
-type AqiReading = { id: string; location: string; city: string; country: string; value: number; pm25: number; parameter: 'pm25'; unit: 'µg/m³'; source: 'Open-Meteo'; lastUpdated: string; coordinates: { latitude: number; longitude: number }; isEstimated: true };
-let cache: { timestamp: number; readings: AqiReading[] } | null = null;
-const requestLog = new Map<string, number[]>();
+interface ReadingBatch {
+  readings: AQIData[];
+  unavailableBatches: number;
+}
+
+const readingCache = new LastKnownGoodCache<ReadingBatch>(CACHE_TTL_MS);
+const forecastCaches = new Map<string, LastKnownGoodCache<AqiForecastPoint[]>>();
+const requestLimiter = new SlidingWindowRateLimiter({ windowMs: 60_000, maxRequests: 20, maxEntriesPerKey: 100, maxKeys: 1_000 });
 
 function rateLimit(req: Request, res: Response, next: NextFunction) {
   const key = req.ip || 'unknown';
-  const now = Date.now();
-  const recent = (requestLog.get(key) || []).filter(time => now - time < 60_000);
-  if (recent.length >= 20) return res.status(429).json({ error: 'Too many requests. Try again shortly.' });
-  recent.push(now); requestLog.set(key, recent); next();
+  const decision = requestLimiter.consume(key);
+  res.set('X-RateLimit-Remaining', String(decision.remaining));
+  if (!decision.allowed) {
+    const error = new RateLimitError();
+    return res.set('Retry-After', String(decision.retryAfterSeconds)).status(error.statusCode).json({ error: error.message, code: error.code });
+  }
+  next();
 }
 
 async function requireFirebaseUser(req: Request, res: Response, next: NextFunction) {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  // Firebase web API keys identify a project; unlike Gemini keys, they are public
-  // configuration. The environment override is useful when deploying another project.
-  const apiKey = process.env.FIREBASE_API_KEY || firebaseConfig.apiKey;
-  if (!token || !apiKey) return res.status(401).json({ error: 'Authentication required.' });
+  const apiKey = process.env.FIREBASE_API_KEY;
+  if (!token || !apiKey) {
+    const error = new AuthError();
+    return res.status(error.statusCode).json({ error: error.message, code: error.code });
+  }
   try {
     await axios.post(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`, { idToken: token }, { timeout: 5000 });
     next();
-  } catch { res.status(401).json({ error: 'Invalid or expired session.' }); }
+  } catch (cause) {
+    const error = new AuthError('Invalid or expired session.', { cause });
+    res.status(error.statusCode).json({ error: error.message, code: error.code });
+  }
 }
 
-async function fetchReadings(): Promise<AqiReading[]> {
-  if (cache && Date.now() - cache.timestamp < CACHE_TTL_MS) return cache.readings;
+async function fetchReadingsFromProvider(): Promise<ReadingBatch> {
   const entries = Object.entries(CITIES);
-  const readings: AqiReading[] = [];
+  const readings: AQIData[] = [];
+  let unavailableBatches = 0;
   // Open-Meteo accepts comma-separated coordinates and returns one result per
   // location. Four multi-location calls are far more reliable than 63 requests.
   for (let index = 0; index < entries.length; index += 10) {
     const batch = entries.slice(index, index + 10);
-    let data: unknown = null;
+    let data: unknown;
     for (let attempt = 0; attempt < 3 && !data; attempt += 1) {
       try {
         const response = await axios.get('https://air-quality-api.open-meteo.com/v1/air-quality', {
@@ -126,27 +142,45 @@ async function fetchReadings(): Promise<AqiReading[]> {
         });
         data = response.data;
       } catch (error) {
-        if (attempt === 2) console.warn(`AQI batch ${Math.floor(index / 10) + 1} unavailable:`, error instanceof Error ? error.message : error);
+        if (attempt === 2) {
+          unavailableBatches += 1;
+          console.warn(`AQI batch ${Math.floor(index / 10) + 1} unavailable:`, errorMessage(error, 'Unknown provider error'));
+        }
         else await new Promise(resolve => setTimeout(resolve, 750 * (attempt + 1)));
       }
     }
-    if (data) {
-      const responses = Array.isArray(data) ? data : [data];
+    if (data !== undefined) {
+      const responses = parseCurrentResponses(data);
       responses.forEach((response, responseIndex) => {
+        if (!response) return;
         const entry = batch[responseIndex];
         if (!entry) return;
         const [city, meta] = entry;
         const [latitude, longitude] = meta.coordinates;
-        const pm25 = Number(response?.current?.pm2_5);
-        if (!Number.isFinite(pm25) || pm25 < 0) return;
-        const providerAqi = Number(response?.current?.us_aqi);
-        readings.push({ id: `open-meteo-${city.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, location: city, city, country: meta.country, value: Math.min(500, Number.isFinite(providerAqi) ? Math.round(providerAqi) : pm25ToUsAqi(pm25)), pm25: Math.round(pm25 * 10) / 10, parameter: 'pm25', unit: 'µg/m³', source: 'Open-Meteo', lastUpdated: response.current.time ? `${response.current.time}Z` : new Date().toISOString(), coordinates: { latitude, longitude }, isEstimated: true });
+        const pm25 = response.current.pm2_5;
+        const providerAqi = response.current.us_aqi;
+        const observedAt = response.current.time;
+        readings.push({ id: `open-meteo-${city.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, location: city, city, country: meta.country, value: Math.min(500, providerAqi === null ? pm25ToUsAqi(pm25) : Math.round(providerAqi)), pm25: Math.round(pm25 * 10) / 10, parameter: 'pm25', unit: 'µg/m³', source: 'Open-Meteo', lastUpdated: observedAt ? `${observedAt}${observedAt.endsWith('Z') ? '' : 'Z'}` : new Date().toISOString(), coordinates: { latitude, longitude }, isEstimated: true });
       });
     }
     await new Promise(resolve => setTimeout(resolve, 250));
   }
-  if (readings.length) cache = { timestamp: Date.now(), readings };
-  return readings;
+  if (!readings.length) throw new ProviderError('Open-Meteo returned no valid readings.');
+  return { readings, unavailableBatches };
+}
+
+async function fetchReadings(force = false) {
+  const snapshot = await loadWithLastKnownGood(readingCache, fetchReadingsFromProvider, {
+    force,
+    warning: 'Open-Meteo is unavailable. Showing the last successful city readings.',
+  });
+  const partialWarning = snapshot.value.unavailableBatches
+    ? `${snapshot.value.unavailableBatches} provider batch${snapshot.value.unavailableBatches === 1 ? '' : 'es'} could not be refreshed.`
+    : undefined;
+  return {
+    ...snapshot,
+    warning: snapshot.warning ?? partialWarning,
+  };
 }
 
 function cleanText(value: unknown, max: number) { return typeof value === 'string' ? value.trim().slice(0, max) : ''; }
@@ -156,10 +190,21 @@ async function startServer() {
   const ai = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
   app.disable('x-powered-by');
   app.use(express.json({ limit: '32kb' }));
-  app.get('/api/health', (_req, res) => res.json({ status: 'ok', dataProvider: 'Open-Meteo', cacheAgeSeconds: cache ? Math.round((Date.now() - cache.timestamp) / 1000) : null }));
-  app.get('/api/aqi/live', async (_req, res) => {
-    try { const results = await fetchReadings(); res.set('Cache-Control', 'no-store, max-age=0').json({ results, meta: { count: results.length, monitoredLocations: Object.keys(CITIES).length, timestamp: new Date().toISOString(), cacheTtlSeconds: CACHE_TTL_MS / 1000, source: 'Open-Meteo', syntheticData: false } }); }
-    catch { res.status(502).json({ error: 'Air-quality provider is temporarily unavailable.' }); }
+  app.get('/api/health', (_req, res) => {
+    const cached = readingCache.read();
+    res.json({ status: 'ok', dataProvider: 'Open-Meteo', cacheAgeSeconds: cached ? Math.round(cached.ageMs / 1_000) : null, cacheStale: cached?.stale ?? false });
+  });
+  app.get('/api/aqi/live', async (req, res) => {
+    try {
+      const force = req.get('Cache-Control')?.includes('no-cache') ?? false;
+      const result = await fetchReadings(force);
+      const results = result.value.readings;
+      const dataTimestamp = results.map(reading => new Date(reading.lastUpdated).getTime()).filter(Number.isFinite).sort((a, b) => b - a)[0];
+      res.set('Cache-Control', 'no-store, max-age=0').json({ results, meta: { count: results.length, monitoredLocations: Object.keys(CITIES).length, timestamp: new Date().toISOString(), dataTimestamp: dataTimestamp ? new Date(dataTimestamp).toISOString() : null, cacheTtlSeconds: CACHE_TTL_MS / 1000, source: 'Open-Meteo', syntheticData: false, stale: result.stale, staleAgeMinutes: Math.max(0, Math.round(result.ageMs / 60_000)), warning: result.warning, unavailableBatches: result.value.unavailableBatches } });
+    } catch (error) {
+      const providerError = error instanceof ProviderError ? error : new ProviderError('Air-quality provider is temporarily unavailable.', { cause: error });
+      res.status(providerError.statusCode).json({ error: providerError.message, code: providerError.code });
+    }
   });
   app.get('/api/aqi/detail', async (req, res) => {
     const city = cleanText(req.query.city, 80);
@@ -167,21 +212,21 @@ async function startServer() {
     if (!entry) return res.status(404).json({ error: 'City is not in the monitored location list.' });
     const [name, meta] = entry;
     try {
-      const response = await axios.get('https://air-quality-api.open-meteo.com/v1/air-quality', {
-        params: { latitude: meta.coordinates[0], longitude: meta.coordinates[1], hourly: 'pm2_5,us_aqi', forecast_days: 2, timezone: 'auto' },
-        timeout: 20_000,
-      });
-      const times: string[] = response.data?.hourly?.time || [];
-      const aqiValues: Array<number | null> = response.data?.hourly?.us_aqi || [];
-      const pm25Values: Array<number | null> = response.data?.hourly?.pm2_5 || [];
-      const oneHourAgo = Date.now() - 60 * 60 * 1000;
-      const forecast = times.map((time, index) => ({ time, aqi: Number(aqiValues[index]), pm25: Number(pm25Values[index]) }))
-        .filter(point => Number.isFinite(point.aqi) && Number.isFinite(point.pm25) && new Date(point.time).getTime() >= oneHourAgo)
-        .slice(0, 24)
-        .map(point => ({ ...point, aqi: Math.min(500, Math.round(point.aqi)), pm25: Math.round(point.pm25 * 10) / 10, label: new Date(point.time).toLocaleTimeString('en', { hour: 'numeric' }) }));
-      return res.set('Cache-Control', 'public, max-age=900').json({ city: name, country: meta.country, forecast, meta: { source: 'Open-Meteo', modeled: true } });
-    } catch {
-      return res.status(502).json({ error: 'The hourly air-quality outlook is temporarily unavailable.' });
+      const cityCache = forecastCaches.get(name) ?? new LastKnownGoodCache<AqiForecastPoint[]>(15 * 60 * 1_000);
+      forecastCaches.set(name, cityCache);
+      const result = await loadWithLastKnownGood(cityCache, async () => {
+        const response = await axios.get('https://air-quality-api.open-meteo.com/v1/air-quality', {
+          params: { latitude: meta.coordinates[0], longitude: meta.coordinates[1], hourly: 'pm2_5,us_aqi', forecast_days: 2, timezone: 'auto' },
+          timeout: 20_000,
+        });
+        const forecast = parseHourlyResponse(response.data);
+        if (!forecast.length) throw new ProviderError('Open-Meteo returned no valid forecast points.');
+        return forecast;
+      }, { warning: 'Showing the last successful forecast because Open-Meteo is unavailable.' });
+      return res.set('Cache-Control', 'public, max-age=900').json({ city: name, country: meta.country, forecast: result.value, meta: { source: 'Open-Meteo', modeled: true, stale: result.stale, staleAgeMinutes: Math.max(0, Math.round(result.ageMs / 60_000)), warning: result.warning } });
+    } catch (error) {
+      const providerError = error instanceof ProviderError ? error : new ProviderError('The hourly air-quality outlook is temporarily unavailable.', { cause: error });
+      return res.status(providerError.statusCode).json({ error: providerError.message, code: providerError.code });
     }
   });
 

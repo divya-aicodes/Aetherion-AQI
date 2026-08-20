@@ -1,5 +1,7 @@
 // Statistical Formulas implementation
 export const statsUtils = {
+  min: (data: number[]) => data.length ? Math.min(...data) : 0,
+  max: (data: number[]) => data.length ? Math.max(...data) : 0,
   mean: (data: number[]) => {
     if (data.length === 0) return 0;
     return data.reduce((a, b) => a + b, 0) / data.length;
@@ -34,6 +36,14 @@ export const statsUtils = {
     return data.reduce((a, b) => a + Math.pow(b - m, 2), 0) / data.length;
   },
   stdDev: (data: number[]) => Math.sqrt(statsUtils.variance(data)),
+  quartile: (data: number[], quartile: 1 | 2 | 3) => {
+    if (data.length === 0) return 0;
+    const sorted = [...data].sort((a, b) => a - b);
+    const position = (sorted.length - 1) * quartile / 4;
+    const lower = Math.floor(position);
+    const upper = Math.ceil(position);
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+  },
   moment: (data: number[], r: number) => {
     const m = statsUtils.mean(data);
     return data.reduce((a, b) => a + Math.pow(b - m, r), 0) / data.length;
